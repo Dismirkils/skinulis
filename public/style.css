@@ -90,6 +90,8 @@ body {
 }
 .org-actions { display: flex; gap: 8px; margin-top: 10px; }
 .danger { color: var(--bad); border-color: var(--bad) !important; }
+.delrow { text-align: center; margin: 14px 0 4px; }
+.delrow .mini-btn { font-size: 13px; opacity: .75; }
 
 /* home */
 .tile { display: block; width: 100%; text-align: left; background: var(--card); border: none;

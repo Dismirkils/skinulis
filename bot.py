@@ -797,6 +797,25 @@ class Handler(BaseHTTPRequestHandler):
             update_card(cid)
             return self.send_json({"view": build_view(cid, code)})
 
+        if action == "delete":
+            if code != c["created_by"]:
+                return self.send_json({"error": "удалить может только организатор"}, 403)
+            chat_id, message_id = c.get("chat_id"), c.get("message_id")
+            with LOCK:
+                STATE["collections"].pop(cid, None)
+                STATE["payments"].pop(cid, None)
+                for k in [k for k in STATE["nags"] if k.startswith(cid + ":")]:
+                    STATE["nags"].pop(k, None)
+                save_state()
+            # карточку в чате тоже подчистим; старые (>48ч) телега не даёт удалять —
+            # тогда хотя бы перепишем на «удалён»
+            if chat_id and message_id and BOT_TOKEN:
+                if not tg("deleteMessage", chat_id=chat_id, message_id=message_id):
+                    tg("editMessageText", chat_id=chat_id, message_id=message_id,
+                       text="%s — 🗑 сбор удалён организатором" % html.escape(c["title"]),
+                       parse_mode="HTML", disable_web_page_preview=True)
+            return self.send_json({"deleted": True, "id": cid})
+
         return self.send_json({"error": "не знаю такое"}, 404)
 
     def do_GET(self):

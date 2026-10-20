@@ -40,6 +40,15 @@ function beepOk() {
   try { tg.HapticFeedback.notificationOccurred('success'); } catch (e) {}
 }
 
+function askConfirm(text) {
+  if (tg && tg.showConfirm) {
+    return new Promise(res => {
+      try { tg.showConfirm(text, ok => res(!!ok)); } catch (e) { res(window.confirm(text)); }
+    });
+  }
+  return Promise.resolve(window.confirm(text));
+}
+
 async function api(path, opts = {}) {
   const r = await fetch(path, Object.assign({
     method: 'GET',
@@ -277,6 +286,9 @@ function renderCollection(c) {
         '<button class="mini-btn danger" id="closeColl">Завершить сбор</button>' +
       '</div></div>';
   }
+  const delRow = c.is_organizer
+    ? '<div class="delrow"><button class="mini-btn ghost danger" id="deleteColl">🗑 удалить совсем</button></div>'
+    : '';
 
   VIEW.innerHTML =
     '<div class="top">' +
@@ -285,7 +297,7 @@ function renderCollection(c) {
     '</div>' +
     '<div class="card">' + target + '</div>' +
     (c.deadline_left ? '<div class="card" style="text-align:center">⏳ <b>' + esc(c.deadline_left) + '</b></div>' : '') +
-    mine + hint + roster + org +
+    mine + hint + roster + org + delRow +
     '<div class="foot">Надёжный учёт без раскрытия чужих сумм' +
       (c.anonymous ? ' · режим анонимности' : '') + '</div>';
 }
@@ -375,6 +387,27 @@ document.addEventListener('click', async (ev) => {
           tg && tg.initData ? { 'Authorization': 'tma ' + tg.initData } : {}),
       });
       S.coll = r.view; haptic(); toast('Сбор закрыт 🏁'); render();
+    } catch (e) { toast(e.message); }
+    return;
+  }
+  if (ev.target.id === 'deleteColl' && S.coll) {
+    const c0 = S.coll;
+    const ok = await askConfirm('Удалить «' + c0.title + '»?\nКарточку в чате тоже снесём. Это навсегда.');
+    if (!ok) return;
+    if (S.demo) {
+      S.home = S.home.filter(t => t.id !== c0.id);
+      S.coll = null; S.tab = 'home';
+      haptic(); toast('Демо: сбор удалён 🗑'); render(); return;
+    }
+    try {
+      await api('/api/c/' + c0.id + '/delete', {
+        method: 'POST', body: '{}',
+        headers: Object.assign({}, { 'Content-Type': 'application/json' },
+          tg && tg.initData ? { 'Authorization': 'tma ' + tg.initData } : {}),
+      });
+      haptic(); toast('Сбор удалён 🗑');
+      S.coll = null; S.tab = 'home';
+      await loadHome(); render();
     } catch (e) { toast(e.message); }
     return;
   }
