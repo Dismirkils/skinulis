@@ -1,0 +1,15 @@
+# данные юзеров иdemo-стейт — наружу не пускаем
+data/
+backup/
+*.json.tmp
+
+# мусор
+__pycache__/
+*.pyc
+*.log
+.DS_Store
+
+# туннель и локальные секреты
+cloudflared
+cloudflared.tgz
+.env
