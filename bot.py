@@ -102,6 +102,7 @@ def tg(method, **params):
     """Bot API POST. Возвращает result | None (всё молча в лог)."""
     if not BOT_TOKEN:
         return None
+    params = {k: v for k, v in params.items() if v is not None}  # None в replyMarkup = Bad Request
     url = "%s/bot%s/%s" % ("https://api.telegram.org", BOT_TOKEN, method)
     req = urllib.request.Request(
         url,
@@ -349,9 +350,9 @@ def fmt_hint_line(c):
 
 
 def card_keyboard(cid):
-    if STATE["collections"][cid]["status"] != "active":
-        return None
-    return {"inline_keyboard": [[{"text": "💸 Скинуться", "url": deep_link(cid)}]]}
+    c = STATE["collections"][cid]
+    label = "💸 Скинуться" if c["status"] == "active" else "🗂 Посмотреть итоги"
+    return {"inline_keyboard": [[{"text": label, "url": deep_link(cid)}]]}
 
 
 def update_card(cid):
