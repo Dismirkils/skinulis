@@ -249,8 +249,10 @@ def total_collected(cid):
 
 
 def unpaid_codes(cid):
+    """Ждём от них денег: не платили и не отказались."""
     paid = payments_of(cid)
-    return [m for m in members_of(cid) if m not in paid]
+    declined = set(STATE["collections"][cid].get("declined") or [])
+    return [m for m in members_of(cid) if m not in paid and m not in declined]
 
 
 def create_collection(title, chat_id, created_by, per=None, goal=None, until=None, anon=False, cur="₽"):
@@ -271,6 +273,7 @@ def create_collection(title, chat_id, created_by, per=None, goal=None, until=Non
         "created_ts": time.time(),
         "closed_ts": None,
         "joined": [str(created_by)],
+        "declined": [],
     }
     STATE["collections"][c["id"]] = c
     payments_of(c["id"])
@@ -303,6 +306,10 @@ def deadline_left(iso):
 
 # ────────────────────────────────────────────────── карточка в чате
 
+def declined_set(cid):
+    return set(STATE["collections"][cid].get("declined") or [])
+
+
 def card_html(cid):
     c = STATE["collections"][cid]
     paid = payments_of(cid)
@@ -319,7 +326,12 @@ def card_html(cid):
 
     names = []
     for code in members_of(cid):
-        mark = "✅" if code in payments_of(cid) else "⭕"
+        if code in declined_set(cid):
+            mark = "🚫"
+        elif code in paid:
+            mark = "✅"
+        else:
+            mark = "⭕"
         names.append(mark + " " + html.escape(user_of(code)["name"]))
     if c["anonymous"]:
         who = "👥 %d уже, %d ждём 💀" % (len(paid), len(unpaid_codes(cid)))
@@ -338,7 +350,7 @@ def card_html(cid):
         fmt_hint_line(c),
     ]
     if c["status"] == "active":
-        parts.append("✏️ Создать новый: /skor Название по 500 до 30.12")
+        parts.append("✏️ Свой сбор так же: <code>/skor Пицца по 400 до 25.10</code>")
     parts.append("Организатор: " + html.escape(org["name"]))
     return "\n".join([p for p in parts if p])
 
@@ -386,12 +398,14 @@ def build_view(cid, me_code):
     paid = payments_of(cid)
     me_paid = me_code in paid
     members = members_of(cid)
+    declined = set(c.get("declined") or [])
 
     roster = []
     for code in members:
         u = user_of(code)
         p = paid.get(code)
-        row = {"id": code, "paid": bool(p), "me": code == me_code}
+        row = {"id": code, "paid": bool(p), "me": code == me_code,
+               "declined": code in declined}
         if row["me"]:
             row["name"] = "Ты"
             if p:
@@ -407,6 +421,8 @@ def build_view(cid, me_code):
 
     me_u = user_of(me_code)
     dl, left_days = deadline_left(c["deadline"])
+    me_state = "paid" if me_paid else ("declined" if me_code in declined
+               else ("waiting" if me_code in members else "none"))
     view = {
         "id": c["id"],
         "title": c["title"],
@@ -426,6 +442,7 @@ def build_view(cid, me_code):
         "total": total_collected(cid),
         "payments": [{"amount": p["amount"]} for p in paid.values()],
         "my_paid": me_paid,
+        "me_state": me_state,
         "my_amount": paid.get(me_code, {}).get("amount"),
         "roster": roster,
         "link": deep_link(cid),
@@ -446,12 +463,59 @@ def my_items(me_code):
             "id": c["id"], "title": c["title"], "deadline_left": dl,
             "my_paid": me_code in paid, "currency": c["currency"],
             "paid_count": len(paid), "unpaid_count": len(unpaid_codes(c["id"])),
+            "is_organizer": c["created_by"] == me_code,
         })
     items.sort(key=lambda x: x["deadline_left"] == "")
     return items
 
 
-# ────────────────────────────────────────────────── дожиматель
+def delete_collection(cid, by=None):
+    """Удалить сбор и всё, что к нему прицеплено. Ошибка — строкой, иначе None."""
+    with LOCK:
+        c = STATE["collections"].get(cid)
+        if not c:
+            return "нет такого сбора"
+        if by is not None and c["created_by"] != str(by):
+            return "только организатор"
+        chat_id, message_id, title = c.get("chat_id"), c.get("message_id"), c["title"]
+        STATE["collections"].pop(cid, None)
+        STATE["payments"].pop(cid, None)
+        for k in [k for k in STATE["nags"] if k.startswith(cid + ":")]:
+            STATE["nags"].pop(k, None)
+        save_state()
+    if chat_id and message_id and BOT_TOKEN:
+        # телега не отдаёт deleteMessage для сообщений старше 48ч — тогда перепишем
+        if not tg("deleteMessage", chat_id=chat_id, message_id=message_id):
+            tg("editMessageText", chat_id=chat_id, message_id=message_id,
+               text="%s — 🗑 сбор удалён организатором" % html.escape(title),
+               parse_mode="HTML", disable_web_page_preview=True)
+    return None
+
+
+def valid_amount(v):
+    """int > 0 или None -> None; мусор -> строка ошибки."""
+    if v in (None, ""):
+        return None
+    try:
+        v = int(v)
+    except (TypeError, ValueError):
+        return "Сумма — просто число, например 400"
+    if v <= 0 or v > 10_000_000:
+        return "Странная сумма"
+    return v
+
+
+def valid_deadline(v):
+    if not v:
+        return None
+    try:
+        datetime.strptime(v, "%Y-%m-%d %H:%M")
+    except (TypeError, ValueError):
+        return "bad_date"
+    return v
+
+
+# ────────────────────────────────────────────────── напоминания (бывают и без дедлайна)
 
 def nag(cid, code, stage, text):
     key = "%s:%s:%s" % (cid, code, stage)
@@ -504,8 +568,8 @@ def tick_collection(cid):
         if t <= 0 and t > -86400:
             for code in debtors:
                 nag(cid, code, "t0",
-                    "🏁 Дедлайн по «%s» прошёл. Успеешь до финального подсчёта — жми «Я скинулся», "
-                    "а то попадёшь в список позора 💀" % c["title"])
+                    "🏁 Дедлайн по «%s» прошёл. Если ещё не скинулся — жми «Я скинулся» до финального подсчёта 💀"
+                    % c["title"])
             return
         if t <= -86400:
             close_collection(cid, c["created_by"], auto=True)
@@ -547,12 +611,20 @@ def close_collection(cid, by, auto=False):
 def cmd_start(msg):
     tg("sendMessage",
        chat_id=msg["chat"]["id"],
-       text="Привет! Это <b>«Скинулись»</b> 💸\n\n"
-            "Создавай сбор прямо в групповом чате:\n"
-            "<code>/skor Подарок Лене по 300 до 28.12</code>\n\n"
-            "Остальное — в мини-аппе:",
+       text="Привет! Это <b>«Скинулись»</b> 💸 — честный учёт общих трат.\n\n"
+            "Деньги переводятся напрямую между людьми, бот только честно считает:\n\n"
+            "🍕 хочешь собрать на общее дело — жми <b>＋ Создать сбор</b> ниже\n"
+            "     или пиши в чате: <code>/skor Пицца по 400 до пт</code>\n"
+            "✅ участники открывают ссылку, отмечаются «я в деле», потом «я скинулся»\n"
+            "💳 реквизиты переводов видны прямо в карточке\n"
+            "⏳ кто тянет до срока — бот аккуратно напомнит в личку\n\n"
+            "Ссылку на сбор можно переслать кому угодно — чат не обязателен.\n\n"
+            "Все твои сборы — кнопка ниже 👇",
        parse_mode="HTML",
-       reply_markup={"inline_keyboard": [[{"text": "🗂 Мои сборы", "url": deep_link("home")}]]},
+       reply_markup={"inline_keyboard": [[
+           {"text": "🗂 Мои сборы", "url": deep_link("home")},
+           {"text": "＋ Создать сбор", "url": deep_link("new")},
+       ]]},
        disable_web_page_preview=True)
 
 
@@ -606,16 +678,105 @@ def cmd_close(msg, args):
 
 def cmd_help(msg):
     tg("sendMessage", chat_id=msg["chat"]["id"],
-       text="💸 <b>Как это работает</b>\n\n"
-            "/skor Название <b>по 300</b> — фикс с каждого\n"
-            "/skor Название <b>на 5000</b> — цель на всех\n"
-            "/skor Название <b>до 28.12 20:00</b> — дедлайн\n"
-            "/skor ... <b>анонимно</b> — суммы скрыть\n"
-            "Можно всё сразу: /skor Подарок Лене по 300 до 28.12 анонимно\n\n"
-            "/list — активные сборы в чате\n"
+       text="💸 <b>Команды</b>\n\n"
+            "<code>/skor Пицца по 400 до 25.10</code> — создать сбор в этом чате\n"
+            "   <b>по 400</b> — с каждого; <b>на 5000</b> — общая сумма\n"
+            "   <b>до 25.10</b>/<b>25.10 20:00</b> — дедлайн; <b>анонимно</b> — суммы скрыть\n\n"
+            "/list — сборы в этом чате\n"
             "/close — закрыть свой последний сбор\n"
-            "/start — показать свои сборы",
+            "/create — создать сбор в мини-аппе (без привязки к чату)\n"
+            "/delete — удалить свой сбор (на выбор)\n"
+            "/edit — поменять название, сумму или дедлайн\n\n"
+            "Что-то пошло не так? Пиши организатору напрямую 🙂",
        parse_mode="HTML", disable_web_page_preview=True)
+
+
+def cmd_create(msg):
+    tg("sendMessage", chat_id=msg["chat"]["id"],
+       text="Создать сбор можно в мини-аппе — жми кнопку 👇\n\n"
+            "<i>Если сбор нужен именно в этом чате (с карточкой для всех) — "
+            "<code>/skor Пицца по 400 до пт</code></i>",
+       parse_mode="HTML",
+       reply_markup={"inline_keyboard": [[{"text": "＋ Создать сбор", "url": deep_link("new")}]]},
+       disable_web_page_preview=True)
+
+
+def cmd_delete(msg, args):
+    chat = msg["chat"]
+    who = uid(msg["from"])
+    mine = collections_of(chat, who)
+    if not mine:
+        tg("sendMessage", chat_id=chat["id"],
+           text="Твоих активных сборов тут нет. 🤷", disable_web_page_preview=True)
+        return
+    n = parse_num(args)
+    if n is None:
+        lines = ["🗑 <b>Что снести?</b> Пиши номер: <code>/delete 2</code>\n"]
+        lines += ["%d) 💸 %s" % (i, html.escape(c["title"])) for i, c in enumerate(mine, 1)]
+        tg("sendMessage", chat_id=chat["id"], text="\n".join(lines), parse_mode="HTML",
+           disable_web_page_preview=True)
+        return
+    if n < 1 or n > len(mine):
+        tg("sendMessage", chat_id=chat["id"],
+           text="Тут номера от 1 до %d 🙂" % len(mine), disable_web_page_preview=True)
+        return
+    c = mine[n - 1]
+    err = delete_collection(c["id"], by=who)
+    if err:
+        tg("sendMessage", chat_id=chat["id"], text="Не вышло: " + err, disable_web_page_preview=True)
+        return
+    tg("sendMessage", chat_id=chat["id"],
+       text="🗑 «%s» удалён." % html.escape(c["title"]), parse_mode="HTML",
+       disable_web_page_preview=True)
+
+
+def cmd_edit(msg, args):
+    chat = msg["chat"]
+    who = uid(msg["from"])
+    mine = collections_of(chat, who)
+    if not mine:
+        tg("sendMessage", chat_id=chat["id"],
+           text="Твоих активных сборов тут нет. Создать: /skor Пицца по 400", disable_web_page_preview=True)
+        return
+    n = parse_num(args)
+    if n is None:
+        if len(mine) == 1:
+            n = 1
+        else:
+            lines = ["✏️ <b>Что меняем?</b> Пиши номер: <code>/edit 2</code>\n"]
+            lines += ["%d) 💸 %s" % (i, html.escape(c["title"])) for i, c in enumerate(mine, 1)]
+            tg("sendMessage", chat_id=chat["id"], text="\n".join(lines), parse_mode="HTML",
+               disable_web_page_preview=True)
+            return
+    if n < 1 or n > len(mine):
+        tg("sendMessage", chat_id=chat["id"],
+           text="Тут номера от 1 до %d 🙂" % len(mine), disable_web_page_preview=True)
+        return
+    c = mine[n - 1]
+    tg("sendMessage", chat_id=chat["id"],
+       text="✏️ <b>%s</b> — название, суммы, дедлайн и реквизиты меняются в аппе:"
+            % html.escape(c["title"]),
+       parse_mode="HTML",
+       reply_markup={"inline_keyboard": [[{"text": "Изменить в аппе", "url": deep_link(c["id"])}]]},
+       disable_web_page_preview=True)
+
+
+def collections_of(chat, who):
+    """Активные сборы, где who организатор: в этом чате или все (личка)."""
+    private = chat["type"] == "private"
+    with LOCK:
+        mine = [c for c in STATE["collections"].values()
+                if c["created_by"] == str(who) and c["status"] == "active"
+                and (private or c.get("chat_id") == chat["id"])]
+        mine.sort(key=lambda c: c["created_ts"])
+    return mine
+
+
+def parse_num(s):
+    try:
+        return max(1, int(s.strip()))
+    except (ValueError, AttributeError):
+        return None
 
 
 def handle_update(upd):
@@ -626,6 +787,15 @@ def handle_update(upd):
     chat_type = msg["chat"]["type"]
     text = (msg.get("text") or "").strip()
     if not text.startswith("/"):
+        # мини-аппа работает в своём окне — лично боту писать не нужно
+        if msg["chat"]["type"] == "private":
+            tg("sendMessage", chat_id=msg["chat"]["id"],
+               text="Я не отвечаю на сообщения 🙂 Я бота-счётчик — вся работа внутри мини-аппы.",
+               reply_markup={"inline_keyboard": [[
+                   {"text": "🗂 Мои сборы", "url": deep_link("home")},
+                   {"text": "＋ Создать сбор", "url": deep_link("new")},
+               ]]},
+               disable_web_page_preview=True)
         return
     parts = text.split(" ", 1)
     cmd = parts[0].lower().split("@")[0]
@@ -636,10 +806,16 @@ def handle_update(upd):
         cmd_help(msg)
     elif cmd == "/skor":
         cmd_skor(msg, args=parts[1] if len(parts) > 1 else "")
+    elif cmd == "/create":
+        cmd_create(msg)
     elif cmd == "/list":
         cmd_list(msg)
     elif cmd == "/close":
         cmd_close(msg, args=rest)
+    elif cmd == "/delete":
+        cmd_delete(msg, args=rest)
+    elif cmd == "/edit":
+        cmd_edit(msg, args=rest)
     else:
         pass  # неизвестная команда — молчим
     save()
@@ -740,15 +916,37 @@ class Handler(BaseHTTPRequestHandler):
                 with LOCK:
                     c = get_collection(start)
                     if c:
-                        if code not in c["joined"]:
-                            c["joined"].append(code)
-                            save_state()
+                        # участие теперь явное: открыл ссылку — смотри, «В деле» нажимаешь — в списке
                         view = build_view(start, code)
                 if c:
-                    update_card(start)  # обновить карточку с новым участником
+                    update_card(start)  # на всякий случай освежить карточку
             me_view = {"id": code, "name": nice_name(me), "username": me.get("username")}
             return self.send_json({"user": me_view, "collection": view,
                                    "bot_username": bot_username or "skinulis_bot"})
+
+        if path == "/api/create":
+            title = (body.get("title") or "").strip()
+            hint = (body.get("pay_hint") or "")[:200]
+            if not title:
+                return self.send_json({"error": "Название надо придумать 🙂"}, 400)
+            if len(title) > 64:
+                return self.send_json({"error": "Название длинновато — до 64 символов"}, 400)
+            per = valid_amount(body.get("per_person"))
+            goal = valid_amount(body.get("goal_total"))
+            if isinstance(per, str):
+                return self.send_json({"error": per}, 400)
+            if isinstance(goal, str):
+                return self.send_json({"error": goal}, 400)
+            until = valid_deadline((body.get("deadline") or "").strip())
+            if until == "bad_date":
+                return self.send_json({"error": "Дедлайн сломался, попробуй ещё раз"}, 400)
+            with LOCK:
+                c = create_collection(title=title, chat_id=None, created_by=code,
+                                      per=per, goal=goal, until=until, cur="₽")
+                c["pay_hint"] = hint
+                cid = c["id"]
+                save_state()
+            return self.send_json({"view": build_view(cid, code)})
 
         m = re.match(r"^/api/c/([a-z0-9_]+)/(.+)$", path)
         if not m:
@@ -798,23 +996,94 @@ class Handler(BaseHTTPRequestHandler):
             update_card(cid)
             return self.send_json({"view": build_view(cid, code)})
 
-        if action == "delete":
+        if action == "edit":
             if code != c["created_by"]:
-                return self.send_json({"error": "удалить может только организатор"}, 403)
-            chat_id, message_id = c.get("chat_id"), c.get("message_id")
+                return self.send_json({"error": "только организатор"}, 403)
+            if c["status"] != "active":
+                return self.send_json({"error": "Сбор закрыт — создание новенького решит всё"}, 409)
+            title = (body.get("title") or "").strip()
+            if title:
+                if len(title) > 64:
+                    return self.send_json({"error": "Название длинновато — до 64 символов"}, 400)
+                c["title"] = title
+            if "per_person" in body:
+                per = valid_amount(body.get("per_person"))
+                if isinstance(per, str):
+                    return self.send_json({"error": per}, 400)
+                c["per_person"] = per
+                if "goal_total" not in body and per:
+                    c["goal_total"] = None
+            if "goal_total" in body:
+                goal = valid_amount(body.get("goal_total"))
+                if isinstance(goal, str):
+                    return self.send_json({"error": goal}, 400)
+                c["goal_total"] = goal
+                if "per_person" not in body and goal:
+                    c["per_person"] = None
+            c["mode"] = "per_person" if c["per_person"] else ("total" if c["goal_total"] else "free")
+            if "deadline" in body:
+                until = valid_deadline((body.get("deadline") or "").strip())
+                if until == "bad_date":
+                    return self.send_json({"error": "Дедлайн сломался, попробуй ещё раз"}, 400)
+                c["deadline"] = until
+            if "pay_hint" in body:
+                c["pay_hint"] = (body.get("pay_hint") or "")[:200]
             with LOCK:
-                STATE["collections"].pop(cid, None)
-                STATE["payments"].pop(cid, None)
-                for k in [k for k in STATE["nags"] if k.startswith(cid + ":")]:
-                    STATE["nags"].pop(k, None)
                 save_state()
-            # карточку в чате тоже подчистим; старые (>48ч) телега не даёт удалять —
-            # тогда хотя бы перепишем на «удалён»
-            if chat_id and message_id and BOT_TOKEN:
-                if not tg("deleteMessage", chat_id=chat_id, message_id=message_id):
-                    tg("editMessageText", chat_id=chat_id, message_id=message_id,
-                       text="%s — 🗑 сбор удалён организатором" % html.escape(c["title"]),
-                       parse_mode="HTML", disable_web_page_preview=True)
+            update_card(cid)
+            return self.send_json({"view": build_view(cid, code)})
+
+        if action == "join":
+            if c["status"] != "active":
+                return self.send_json({"error": "Сбор закрыт"}, 409)
+            with LOCK:
+                dec = c.get("declined") or []
+                if code in dec:
+                    dec.remove(code)
+                    save_state()
+                if code not in c["joined"]:
+                    c["joined"].append(code)
+                    save_state()
+            update_card(cid)
+            return self.send_json({"view": build_view(cid, code)})
+
+        if action == "decline":
+            if c["status"] != "active":
+                return self.send_json({"error": "Сбор закрыт"}, 409)
+            with LOCK:
+                dec = c.setdefault("declined", [])
+                if code not in dec:
+                    dec.append(code)
+                    save_state()
+            update_card(cid)
+            return self.send_json({"view": build_view(cid, code)})
+
+        if action == "add":
+            if code != c["created_by"]:
+                return self.send_json({"error": "только организатор"}, 403)
+            if c["status"] != "active":
+                return self.send_json({"error": "Сбор закрыт"}, 409)
+            codes = body.get("codes") or []
+            if not isinstance(codes, list):
+                return self.send_json({"error": "codes должен быть списком"}, 400)
+            with LOCK:
+                added = 0
+                for ucode in codes[:20]:
+                    ucode = str(ucode)
+                    if ucode not in STATE["users"]:
+                        continue
+                    if ucode not in c["joined"]:
+                        c["joined"].append(ucode)
+                        added += 1
+                if added:
+                    save_state()
+            update_card(cid)
+            return self.send_json({"added": added, "view": build_view(cid, code)})
+
+        if action == "delete":
+            err = delete_collection(cid, by=code)
+            if err:
+                return self.send_json({"error": err}, err == "только организатор" and 403 or 404)
             return self.send_json({"deleted": True, "id": cid})
 
         return self.send_json({"error": "не знаю такое"}, 404)
@@ -832,6 +1101,20 @@ class Handler(BaseHTTPRequestHandler):
                 with LOCK:
                     items = my_items(code)
                 return self.send_json({"items": items, "bot_username": bot_username or "skinulis_bot"})
+            mu = re.match(r"^/api/users/([a-z0-9_]+)$", path)
+            if mu:
+                cid = mu.group(1)
+                with LOCK:
+                    c = get_collection(cid)
+                    taken = set(c.get("joined") or []) if c else set()
+                    if c:
+                        taken.add(c["created_by"])
+                        taken |= set(payments_of(cid).keys())
+                    ppl = [{"code": k, "name": v.get("name") or "???",
+                            "username": v.get("username") or ""}
+                           for k, v in sorted(STATE["users"].items())
+                           if k != code and k not in taken]
+                return self.send_json({"items": ppl})
             m = re.match(r"^/api/c/([a-z0-9_]+)$", path)
             if m:
                 with LOCK:
@@ -889,6 +1172,22 @@ def polling_loop():
                 log.warning("update обработка: %s", e)
 
 
+BOT_COMMANDS = [
+    ("skor",   "Создать сбор в этом чате"),
+    ("list",   "Сборы этого чата"),
+    ("close",  "Закрыть свой последний сбор"),
+    ("create", "Создать сбор в мини-аппе"),
+    ("delete", "Удалить свой сбор"),
+    ("edit",   "Изменить название, сумму, дедлайн"),
+]
+
+
+def register_commands():
+    if BOT_TOKEN:
+        tg("setMyCommands", commands=[{"command": c, "description": d} for c, d in BOT_COMMANDS])
+        log.info("Меню команд обновлено: %s", ", ".join("/" + c for c, _ in BOT_COMMANDS))
+
+
 def main():
     load_state()
     global bot_username
@@ -896,6 +1195,7 @@ def main():
         me = tg("getMe")
         if me and me.get("username"):
             bot_username = me["username"]
+        register_commands()
         threading.Thread(target=polling_loop, daemon=True).start()
     else:
         log.info("BOT_TOKEN не задан — запускается только веб-часть (демо-режим)")

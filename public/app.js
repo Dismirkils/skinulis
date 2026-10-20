@@ -9,9 +9,11 @@ const S = {
   user: null,
   bot: 'skinulis_bot',
   demo: false,
-  tab: 'home',       // home | collection
+  tab: 'home',       // home | collection | form
   coll: null,        // текущий сбор (view с сервера или демо)
   home: [],          // «мои сборы»
+  addPool: undefined,// список, кого можно добавить (для организатора)
+  form: null,        // {mode:'create'|'edit', chip, data}
   introDone: localStorage.getItem('skinulis_intro_v2') === '1',
 };
 
@@ -73,14 +75,15 @@ const DEMO = () => ({
       per_person: 400, goal_total: null, currency: '₽',
       deadline: null, deadline_left: 'до 30.10 20:00',
       anonymous: false, pay_hint: 'СБП +7 900 ***-**-45 (Иван)',
-      status: 'active', is_organizer: true,
+      status: 'active', is_organizer: true, me_state: 'waiting',
       organizer: { name: 'Ты', username: 'tester' },
-      paid_count: 1, unpaid_count: 2, total: 400,
+      paid_count: 1, unpaid_count: 1, total: 400,
       my_paid: false, my_amount: null, link: '#',
       roster: [
         { id: '900000', paid: false, me: true, name: 'Ты' },
         { id: '900001', paid: false, name: 'Паша', username: 'pavel' },
         { id: '900002', paid: true, name: 'Лена', username: 'lena', amount: 400 },
+        { id: '900003', paid: false, name: 'Митя', username: 'mitya', declined: true },
       ],
     },
     {
@@ -88,14 +91,14 @@ const DEMO = () => ({
       per_person: 300, goal_total: null, currency: '₽',
       deadline: null, deadline_left: 'до 28.12 23:59',
       anonymous: true, pay_hint: '',
-      status: 'active', is_organizer: false,
+      status: 'active', is_organizer: false, me_state: 'none',
       organizer: { name: 'Матильда', username: 'mda' },
       paid_count: 2, unpaid_count: 1, total: 600,
       my_paid: false, my_amount: null, link: '#',
       roster: [
-        { id: '900000', paid: false, me: true, name: 'Ты' },
         { id: 'x1', paid: true, name: null },
         { id: 'x2', paid: true, name: null },
+        { id: '900001', paid: false, name: 'Паша', username: 'pavel' },
       ],
     },
   ],
@@ -151,6 +154,7 @@ function toTile(c) {
     id: c.id, title: c.title, deadline_left: c.deadline_left,
     my_paid: c.my_paid, currency: c.currency,
     paid_count: c.paid_count, unpaid_count: c.unpaid_count,
+    is_organizer: !!c.is_organizer,
   };
 }
 
@@ -170,6 +174,7 @@ function navColl(id) {
 
 async function openReal(id) {
   VIEW.innerHTML = '<div class="hero"><div class="e">⏳</div></div>';
+  S.addPool = undefined;
   try {
     S.coll = await api('/api/c/' + id);
     S.tab = 'collection';
@@ -190,32 +195,109 @@ function chipOf(c) {
 
 function render() {
   if (S.tab === 'collection' && S.coll) renderCollection(S.coll);
+  else if (S.tab === 'form') renderForm();
   else renderHome();
   renderButtons();
 }
 
 /* — home — */
 function renderHome() {
-  const tiles = S.home.length ? S.home.map(t =>
-    '<button class="tile" data-nav="' + esc(t.id) + '">' +
+  const tiles = S.home.length ? S.home.map(t => {
+    return '<div class="tile" data-nav="' + esc(t.id) + '">' +
+      (t.is_organizer ? '<button class="delsmall" data-del="' + esc(t.id) + '" title="Удалить">✕</button>' : '') +
       '<div class="t">' + (t.my_paid ? '✅ ' : '💸 ') + esc(t.title) + '</div>' +
       '<div class="s">' +
         (t.deadline_left ? '<span>' + esc(t.deadline_left) + '</span>' : '') +
         '<span>👍 ' + t.paid_count + '</span>' +
         (t.unpaid_count ? '<span class="unpaid">💀 ждём: ' + t.unpaid_count + '</span>' : '') +
       '</div>' +
-    '</button>').join('')
-    : '<div class="card hero"><div class="e">💸</div>' +
-      '<p>Своих сборов нет.<br>Создай в любом чате командой<br><code>/skor Пицца по 400 до 30.10</code></p></div>';
+    '</div>';
+  }).join('')
+  : '<div class="card hero"><div class="e">💸</div>' +
+    '<p><b>Сборов пока нет.</b><br>Жми «＋ Создать сбор» — название, сумма, дедлайн.' +
+    '<br>Дальше просто: поделись ссылкой, и кто в деле — сам отметится ✅</p></div>';
 
   VIEW.innerHTML =
-    '<div class="top"><h1>🗂 Мои сборы</h1></div>' + tiles +
-    '<div class="foot">Скинулись 💸 · честный учёт и дожиматель</div>';
+    '<div class="top"><h1>🗂 Мои сборы</h1></div>' +
+    '<button class="big-btn" id="createBtn">＋ Создать сбор</button>' + tiles +
+    '<div class="foot">Скинулись 💸 · честный учёт общих трат</div>';
+}
+
+/* — форма (создать / изменить) — */
+function openCreate() {
+  haptic();
+  S.form = { mode: 'create', chip: 'per', data: {} };
+  S.tab = 'form';
+  render();
+}
+
+function openEdit() {
+  const c = S.coll;
+  S.form = {
+    mode: 'edit',
+    chip: c.mode === 'total' ? 'sum' : (c.mode === 'per_person' ? 'per' : 'free'),
+    data: { title: c.title, per_person: c.per_person, goal_total: c.goal_total,
+            deadline: c.deadline || '', pay_hint: c.pay_hint || '' },
+  };
+  S.tab = 'form';
+  render();
+}
+
+function renderForm() {
+  const f = S.form;
+  const d = f.data;
+  const chip = f.chip;
+
+  const chips =
+    [['per', '💵 По N с каждого'], ['sum', '💰 Общая сумма'], ['free', '🎲 Кто сколько хочет']]
+      .map(k => '<button class="chip' + (chip === k[0] ? ' on' : '') + '" data-chip="' + k[0] + '">' + k[1] + '</button>').join('');
+
+  let sumHtml;
+  if (chip === 'per') {
+    sumHtml = '<label class="fl">С каждого по</label>' +
+      '<input id="fPer" inputmode="numeric" placeholder="400" value="' + (d.per_person || '') + '">';
+  } else if (chip === 'sum') {
+    sumHtml = '<label class="fl">Собираем всего</label>' +
+      '<input id="fGoal" inputmode="numeric" placeholder="5000" value="' + (d.goal_total || '') + '">';
+  } else {
+    sumHtml = '<div class="sub" style="margin:2px 0 0">Каждый введёт свою сумму сам 🎲</div>';
+  }
+
+  const [dy, dt] = d.deadline && d.deadline.includes(' ') ? d.deadline.split(' ') : ['', ''];
+  VIEW.innerHTML =
+    '<div class="top"><button class="back on" id="backBtn">‹</button>' +
+      '<h1>' + (f.mode === 'create' ? 'Новый сбор' : 'Изменить сбор') + '</h1></div>' +
+    '<div class="card">' +
+      '<label class="fl">Название</label>' +
+      '<input id="fTitle" maxlength="64" placeholder="Пицца на пятницу" value="' + esc(d.title || '') + '">' +
+      '<label class="fl">Как считаем</label>' +
+      '<div class="chips" id="fModeChips">' + chips + '</div>' +
+      sumHtml +
+      '<label class="fl">Дедлайн (не обязательно)</label>' +
+      '<div class="dl-row">' +
+        '<input type="date" id="fDate" value="' + esc(dy || '') + '">' +
+        '<input type="time" id="fTime" value="' + esc(dt || '') + '">' +
+      '</div>' +
+      '<label class="fl">Куда скидывать (реквизиты, увидят участники)</label>' +
+      '<input id="fHint" placeholder="СБП, карта, ссылка…" value="' + esc(d.pay_hint || '') + '">' +
+      '<button class="mini-btn go" id="fSave">' + (f.mode === 'create' ? 'Создать сбор 💸' : 'Сохранить') + '</button>' +
+    '</div>' +
+    (f.mode === 'create'
+      ? '<div class="foot">Сбор будет личным — только ты и те, кто откроет аппу.<br>' +
+        'Чтобы карточка висела в чате: /skor в чате командой → «Пицца по 400 до пт»</div>'
+      : '');
 }
 
 /* — collection — */
+function meStateOf(c) {
+  if (c.me_state) return c.me_state;
+  if (c.my_paid) return 'paid';
+  return 'none';
+}
+
 function renderCollection(c) {
-  const unpaid = c.roster.filter(r => !r.paid).length;
+  const unpaid = c.roster.filter(r => !r.paid && !r.declined).length;
+  const declinedN = c.roster.filter(r => r.declined).length;
 
   /* цель */
   let target;
@@ -233,13 +315,26 @@ function renderCollection(c) {
              '<div class="sub">кто сколько хочет · скинулись ' + c.paid_count + ' · ждём ' + unpaid + '</div>';
   }
 
-  /* мой блок */
+  /* мой блок — зависит от того, участвуют ли */
+  const st = meStateOf(c);
   let mine;
-  if (c.my_paid) {
+  if (st === 'paid') {
     mine = '<div class="card">' +
       '<div class="mystatus"><span class="emoji">✅</span>' +
       '<div><div class="big" style="font-size:22px">' + money(c.my_amount, c.currency) + '</div>' +
       '<div class="sub">Ты скинулся. Красавчик 💪</div></div></div></div>';
+  } else if (st === 'declined') {
+    mine = '<div class="card"><div class="mystatus"><span class="emoji">🚫</span>' +
+      '<div><div class="big" style="font-size:20px">Ты не участвуешь</div>' +
+      '<div class="sub">Если передумал — кнопка ниже. Никто не осудит 🙂</div></div></div>' +
+      '<div class="org-actions single"><button class="mini-btn ghost" id="joinMe">↩️ Вернуться в сбор</button></div></div>';
+  } else if (st === 'none' && c.status === 'active') {
+    mine = '<div class="card"><h2>Ты участвуешь?</h2>' +
+      '<div class="sub">Нажми «В деле» — попадёшь в список участников. Отказался — видно всем 🚫</div>' +
+      '<div class="org-actions">' +
+        '<button class="mini-btn go" id="joinMe">💸 В деле</button>' +
+        '<button class="mini-btn ghost" id="declineMe">🚫 Не мой расклад</button>' +
+      '</div></div>';
   } else if (c.status === 'active') {
     mine = '<div class="card">' +
       '<div class="mystatus"><span class="emoji">💸</span>' +
@@ -252,6 +347,7 @@ function renderCollection(c) {
       (tg ? '' : '<div style="margin-top:10px"><button class="mini-btn go" id="payFallback">Я скинулся ✅' +
         (c.mode === 'per_person' && c.per_person ? ' ' + esc(c.per_person) + ' ' + esc(c.currency) : '') +
         '</button><div class="sub" style="margin-top:6px">Кнопка внизу появится в Telegram</div></div>') +
+      '<div class="org-actions single"><button class="mini-btn ghost" id="declineMe">🚫 Не участвую</button></div>' +
       '</div>';
   } else {
     mine = '<div class="card"><div class="mystatus"><span class="emoji">🏁</span>' +
@@ -265,29 +361,52 @@ function renderCollection(c) {
       '<button class="mini-btn" id="copyHint">копировать</button></div>'
     : '';
 
-  /* участники */
+  /* участники: ✅ скинулся · ⭕ в деле · 🚫 отказался */
   const rows = c.roster.map(r => {
     const nm = r.me ? 'Ты' : (r.name ? esc(r.name) : '<i>скрыт</i>');
     const amt = r.paid && r.amount != null ? '<span class="amt">' + esc(r.amount) + ' ' + esc(c.currency) + '</span>' : '';
     const masked = (!r.me && !r.name) ? ' class="masked"' : '';
-    return '<li' + masked + '>' +
-      '<span class="st">' + (r.paid ? '✅' : '⭕') + '</span>' +
+    const mark = r.declined ? '🚫' : (r.paid ? '✅' : '⭕');
+    return '<li' + (r.declined ? ' class="declined"' : '') + masked + '>' +
+      '<span class="st">' + mark + '</span>' +
       '<span class="nm' + (r.me ? ' me' : '') + '">' + nm + '</span>' + amt + '</li>';
   }).join('');
-  const roster = '<div class="card"><h2>Учёт</h2><ul class="who">' + rows + '</ul></div>';
+  const roster = '<div class="card"><h2>Участники</h2>' +
+    '<div class="roster-legend">✅ скинулся · ⭕ в деле · 🚫 отказался</div>' +
+    '<ul class="who">' + rows + '</ul>' +
+    '<div class="org-actions single"><button class="mini-btn ghost" data-share="1">📤 Поделиться ссылкой</button></div>' +
+    '</div>';
 
   /* организаторская панель */
   let org = '';
   if (c.is_organizer && c.status === 'active') {
+    let usersPool = '';
+    if (S.addPool === 'loading') {
+      usersPool = '<div class="sub">смотрю, кто тут зарегистрирован…</div>';
+    } else if (S.addPool === 'empty') {
+      usersPool = '<div class="sub">Ещё никто не отметился в боте — пусть откроют ссылку 📤</div>';
+    } else if (Array.isArray(S.addPool) && S.addPool.length) {
+      usersPool = '<div class="addpool">' +
+        S.addPool.map(u =>
+          '<label class="urow"><input type="checkbox" data-user="' + esc(u.code) + '">' +
+          '<span>' + esc(u.name) + (u.username ? ' <i>@' + esc(u.username) + '</i>' : '') + '</span></label>'
+        ).join('') +
+        '<div class="org-actions single"><button class="mini-btn go" id="addGo" disabled>Добавить выбранных</button></div>' +
+        '</div>';
+    }
     org = '<div class="card org-panel"><h2>Организатору</h2>' +
       '<input id="hintInput" placeholder="Куда скидывать: СБП, карта…" value="' + esc(c.pay_hint) + '">' +
       '<div class="org-actions">' +
         '<button class="mini-btn ghost" id="saveHint">Сохранить реквизиты</button>' +
         '<button class="mini-btn danger" id="closeColl">Завершить сбор</button>' +
-      '</div></div>';
+      '</div>' +
+      '<div class="org-actions single"><button class="mini-btn ghost" id="addUsersBtn">➕ Добавить участников</button></div>' +
+      usersPool +
+      '<div class="org-actions single"><button class="mini-btn ghost" id="editColl">✏️ Изменить название, сумму, дедлайн</button></div>' +
+      '</div>';
   }
   const delRow = c.is_organizer
-    ? '<div class="delrow"><button class="mini-btn ghost danger" id="deleteColl">🗑 удалить совсем</button></div>'
+    ? '<div class="delrow"><button class="mini-btn danger" id="deleteColl">Удалить сбор</button></div>'
     : '';
 
   VIEW.innerHTML =
@@ -312,9 +431,14 @@ function renderButtons() {
     tg.MainButton.hide();
     return;
   }
+  if (S.tab === 'form') {
+    tg.BackButton.show();
+    tg.MainButton.hide();
+    return;
+  }
   const c = S.coll;
   tg.BackButton.show();
-  if (c.status === 'active' && !c.my_paid) {
+  if (c.status === 'active' && meStateOf(c) === 'waiting') {
     const sum = c.mode === 'per_person' && c.per_person ? ' ' + c.per_person + ' ' + c.currency : '';
     tg.MainButton.setText('Я скинулся ✅' + (sum ? sum : ''));
     tg.MainButton.show();
@@ -355,13 +479,114 @@ async function markPaid() {
 
 /* ─────────── действия */
 
+/* — helpers удаления и формы — */
+
+function authHeaders() {
+  return Object.assign({ 'Content-Type': 'application/json' },
+    tg && tg.initData ? { 'Authorization': 'tma ' + tg.initData } : {});
+}
+
+async function deleteById(id) {
+  await api('/api/c/' + id + '/delete', { method: 'POST', body: '{}', headers: authHeaders() });
+}
+
+function nameOf(id) {
+  const t = S.home.find(x => x.id === id);
+  return t ? t.title : '';
+}
+
+async function submitForm() {
+  const f = S.form;
+  const title = $('#fTitle').value.trim();
+  if (!title) { toast('Название надо придумать 🙂'); haptic('rigid'); return; }
+  let per = null, goal = null;
+  if (f.chip === 'per') {
+    per = parseInt($('#fPer') ? $('#fPer').value : '', 10);
+    if (!per || per <= 0) { toast('Сколько с каждого? Например: 400'); haptic('rigid'); return; }
+  } else if (f.chip === 'sum') {
+    goal = parseInt($('#fGoal') ? $('#fGoal').value : '', 10);
+    if (!goal || goal <= 0) { toast('Сколько собираем всего? Например: 5000'); haptic('rigid'); return; }
+  }
+  const dy = $('#fDate') && $('#fDate').value ? $('#fDate').value : '';
+  const dt = $('#fTime') && $('#fTime').value ? $('#fTime').value : '';
+  const deadline = dy && dt ? dy + ' ' + dt : '';
+  const hint = $('#fHint') ? $('#fHint').value.trim() : '';
+  const data = { title: title, per_person: per, goal_total: goal, deadline: deadline, pay_hint: hint };
+
+  const prettyDl = deadline ? 'до ' + dy.split('-').reverse().join('.') + ' ' + dt : '';
+
+  if (S.demo) {
+    const id = 'c_demo' + Date.now().toString(36);
+    const view = {
+      id: id, title: title,
+      mode: f.chip === 'per' ? 'per_person' : (f.chip === 'sum' ? 'total' : 'free'),
+      per_person: per, goal_total: goal, currency: '₽',
+      deadline: deadline || null, deadline_left: prettyDl, anonymous: false, pay_hint: hint,
+      status: 'active', is_organizer: true, organizer: { name: S.user ? S.user.name : 'Ты' },
+      paid_count: 0, unpaid_count: 0, total: 0, my_paid: false, my_amount: null,
+      roster: [{ id: '900000', paid: false, me: true, name: 'Ты' }], link: '#',
+    };
+    if (f.mode === 'create') {
+      S.home.unshift({ id: id, title: title, deadline_left: prettyDl, my_paid: false,
+        currency: '₽', paid_count: 0, unpaid_count: 0, is_organizer: true });
+      S.coll = view;
+      beepOk(); toast('Демо: сбор создан 💸');
+    } else {
+      Object.assign(S.coll, view, { id: S.coll.id, status: S.coll.status,
+        roster: S.coll.roster, paid_count: S.coll.paid_count, unpaid_count: S.coll.unpaid_count,
+        total: S.coll.total, my_paid: S.coll.my_paid, my_amount: S.coll.my_amount });
+      beepOk(); toast('Демо: сохранено ✅');
+    }
+    S.form = null; S.tab = 'collection';
+    return render();
+  }
+
+  try {
+    const r = f.mode === 'create'
+      ? await api('/api/create', { method: 'POST', body: JSON.stringify(data), headers: authHeaders() })
+      : await api('/api/c/' + S.coll.id + '/edit', { method: 'POST', body: JSON.stringify(data), headers: authHeaders() });
+    S.coll = r.view;
+    S.form = null;
+    S.tab = 'collection';
+    beepOk();
+    toast(f.mode === 'create' ? 'Сбор создан 💸' : 'Сохранено ✅');
+    render();
+    loadHome();
+  } catch (e) {
+    toast(e.message);
+    haptic('rigid');
+  }
+}
+
 document.addEventListener('click', async (ev) => {
   if (ev.target.id === 'payFallback') return markPaid();
+
+  /* крестик удаления на плитке: раньше навигации — он окружён плиткой */
+  const delBtn = ev.target.closest('[data-del]');
+  if (delBtn) {
+    const id = delBtn.dataset.del;
+    const t = S.home.find(x => x.id === id);
+    const ok = await askConfirm('Удалить «' + (t ? t.title : 'сбор') + '»?\nКарточка в чате тоже снесётся. Это навсегда.');
+    if (!ok) return;
+    if (S.demo) {
+      S.home = S.home.filter(x => x.id !== id);
+      haptic(); toast('Демо: удалено 🗑'); return render();
+    }
+    try {
+      await deleteById(id);
+      haptic(); beepOk(); toast('Сбор удалён 🗑');
+      await loadHome(); render();
+    } catch (e) { toast(e.message); }
+    return;
+  }
 
   const nav = ev.target.closest('[data-nav]');
   if (nav) { haptic(); return navColl(nav.dataset.nav); }
 
-  if (ev.target.id === 'backBtn') return navHome();
+  if (ev.target.id === 'backBtn') {
+    if (S.tab === 'form') { S.tab = S.coll ? 'collection' : 'home'; S.form = null; return render(); }
+    return navHome();
+  }
   if (ev.target.id === 'copyHint') {
     const text = S.coll && S.coll.pay_hint || '';
     try { await navigator.clipboard.writeText(text); } catch (e) {}
@@ -390,6 +615,50 @@ document.addEventListener('click', async (ev) => {
     } catch (e) { toast(e.message); }
     return;
   }
+  /* — home: создать — */
+  if (ev.target.closest('#createBtn')) return openCreate();
+
+  /* — участие: в деле / отказ — */
+  if (ev.target.id === 'joinMe' && S.coll) return membershipToggle('join');
+  if (ev.target.id === 'declineMe' && S.coll) return membershipToggle('decline');
+
+  /* — организатор: пул известных людей для добавления — */
+  if (ev.target.id === 'addUsersBtn' && S.coll) {
+    if (S.addPool && S.addPool.length) { S.addPool = undefined; haptic(); return render(); }
+    S.addPool = 'loading'; render();
+    try {
+      const r = await api('/api/users/' + S.coll.id);
+      S.addPool = (r.items || []).length ? r.items : 'empty';
+    } catch (e) { S.addPool = undefined; toast(e.message); }
+    return render();
+  }
+  if (ev.target.id === 'addGo' && S.coll) {
+    const codes = [...VIEW.querySelectorAll('.addpool input[type=checkbox]:checked')].map(i => i.dataset.user);
+    if (!codes.length) return;
+    try {
+      const r = await api('/api/c/' + S.coll.id + '/add', {
+        method: 'POST', body: JSON.stringify({ codes }), headers: authHeaders(),
+      });
+      S.coll = r.view; S.addPool = undefined;
+      haptic(); beepOk(); toast('Добавлено: ' + r.added + ' 👥');
+      render();
+    } catch (e) { toast(e.message); }
+    return;
+  }
+
+  /* — форма (создать / изменить) — */
+  const chipBtn = ev.target.closest('#fModeChips [data-chip]');
+  if (chipBtn && S.form) {
+    S.form.chip = chipBtn.dataset.chip;
+    haptic();
+    return renderForm();
+  }
+  if (ev.target.id === 'fSave' && S.form) return submitForm();
+
+  /* — организатор: изменить — */
+  if (ev.target.id === 'editColl' && S.coll) { haptic(); return openEdit(); }
+
+  /* — удаление внутри сбора — */
   if (ev.target.id === 'deleteColl' && S.coll) {
     const c0 = S.coll;
     const ok = await askConfirm('Удалить «' + c0.title + '»?\nКарточку в чате тоже снесём. Это навсегда.');
@@ -400,17 +669,14 @@ document.addEventListener('click', async (ev) => {
       haptic(); toast('Демо: сбор удалён 🗑'); render(); return;
     }
     try {
-      await api('/api/c/' + c0.id + '/delete', {
-        method: 'POST', body: '{}',
-        headers: Object.assign({}, { 'Content-Type': 'application/json' },
-          tg && tg.initData ? { 'Authorization': 'tma ' + tg.initData } : {}),
-      });
-      haptic(); toast('Сбор удалён 🗑');
+      await deleteById(c0.id);
+      haptic(); beepOk(); toast('Сбор удалён 🗑');
       S.coll = null; S.tab = 'home';
       await loadHome(); render();
     } catch (e) { toast(e.message); }
     return;
   }
+
   /* поделиться */
   const shareB = ev.target.closest('[data-share]');
   if (shareB) {
@@ -422,14 +688,58 @@ document.addEventListener('click', async (ev) => {
   }
 });
 
-if (tg) tg.BackButton.onClick(() => navHome());
+if (tg) tg.BackButton.onClick(() => {
+  if (S.tab === 'form') { S.tab = S.coll ? 'collection' : 'home'; S.form = null; render(); return; }
+  navHome();
+});
+
+/* чекбоксы в пуле добавления: живым управляем кнопкой */
+document.addEventListener('change', (ev) => {
+  if (!ev.target.closest || !ev.target.closest('.addpool')) return;
+  const n = VIEW.querySelectorAll('.addpool input[type=checkbox]:checked').length;
+  const go = $('#addGo');
+  if (go) { go.disabled = !n; go.textContent = n ? 'Добавить (' + n + ')' : 'Добавить выбранных'; }
+});
+
+/* — участие: в деле / не участвую — */
+async function membershipToggle(action) {
+  const c = S.coll;
+  if (S.demo) {
+    const meRow = c.roster.find(r => r.me);
+    if (action === 'join') {
+      c.me_state = 'waiting';
+      if (meRow) meRow.declined = false;
+      else c.roster.unshift({ id: '900000', paid: false, me: true, name: 'Ты' });
+      haptic(); toast('Ты в деле ✅');
+    } else {
+      c.me_state = 'declined';
+      if (meRow) meRow.declined = true;
+      else c.roster.push({ id: '900000', paid: false, me: true, name: 'Ты', declined: true });
+      haptic(); toast('Ок, не участвуешь 🚫');
+    }
+    c.paid_count = c.roster.filter(r => r.paid).length;
+    c.unpaid_count = c.roster.filter(r => !r.paid && !r.declined).length;
+    if (action === 'decline') c.unpaid_count = Math.max(0, c.unpaid_count);
+    return render();
+  }
+  try {
+    const r = await api('/api/c/' + c.id + '/' + action, {
+      method: 'POST', body: '{}', headers: authHeaders(),
+    });
+    S.coll = r.view;
+    haptic();
+    toast(action === 'join' ? 'Ты в деле ✅' : 'Не учавствуешь 🚫');
+    render();
+    loadHome();
+  } catch (e) { toast(e.message); }
+}
 
 /* ─────────── онбординг (3 шага, один раз) */
 
 const INTRO = [
-  { e: '💸', h: 'Скинулись', p: 'Честный учёт общих сборов прямо в Telegram-чате.' },
-  { e: '✅', h: 'Один клик', p: 'Реквизиты перед глазами, скинулся — подтвердил.' },
-  { e: '💀', h: 'Дожиматель', p: 'Дедлайны и напоминания тем, кто тянет резину.' },
+  { e: '💸', h: 'Скинулись', p: 'Честный учёт общих сборов прямо в Telegram— без переводов боту и обид.' },
+  { e: '✅', h: 'Один клик', p: 'Реквизиты перед глазами, скинулся — подтвердил, все видят кто в деле.' },
+  { e: '⏳', h: 'Дедлайны', p: 'Кто тянет — бот аккуратно напомнит в личку. Дружно, без позора.' },
 ];
 
 function showIntro() {

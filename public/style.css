@@ -48,6 +48,7 @@ body {
 .card h2 { font-size: 13px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; margin-bottom: 10px; }
 .big { font-size: 28px; font-weight: 800; letter-spacing: -.5px; }
 .sub { color: var(--muted); font-size: 13px; margin-top: 3px; }
+.roster-legend { color: var(--muted); font-size: 12px; margin: 2px 0 10px; }
 
 .bar { height: 8px; border-radius: 4px; background: rgba(127,127,140,.25); margin-top: 12px; overflow: hidden; }
 .bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--ok)); border-radius: 4px; transition: width .5s; }
@@ -89,12 +90,64 @@ body {
   background: var(--bg); color: var(--text); font-size: 15px; outline: none;
 }
 .org-actions { display: flex; gap: 8px; margin-top: 10px; }
+.org-actions.single { margin-top: 8px; }
+.org-actions.single .mini-btn { width: 100%; text-align: center; }
 .danger { color: var(--bad); border-color: var(--bad) !important; }
-.delrow { text-align: center; margin: 14px 0 4px; }
-.delrow .mini-btn { font-size: 13px; opacity: .75; }
+.delrow { margin: 18px 0 6px; }
+/* участники: статусы */
+.who li.declined { opacity: .55; }
+.who li.declined .nm { text-decoration: line-through; }
+
+/* организатор: добавление участников */
+.addpool { margin-top: 10px; border: 1px dashed var(--line); border-radius: 12px; padding: 8px 10px; }
+.urow { display: flex; align-items: center; gap: 9px; padding: 7px 2px; font-size: 15px; cursor: pointer; }
+.urow input { accent-color: var(--accent); width: 18px; height: 18px; }
+.urow i { color: var(--muted); font-style: normal; font-size: 13px; }
+.sub legend { margin: 4px 0 8px; }
+.delrow .mini-btn {
+  width: 100%; padding: 12px; border-radius: 12px;
+  background: var(--card); border: 1px solid var(--bad); color: var(--bad);
+  font-weight: 700; font-size: 15px; opacity: 1;
+}
+
+/* home: создать / мультивыбор */
+.big-btn {
+  display: block; width: 100%; padding: 13px; margin: 4px 0 14px;
+  border-radius: 14px; border: 1px dashed var(--accent); background: transparent;
+  color: var(--accent); font: inherit; font-size: 15px; font-weight: 700; cursor: pointer;
+}
+.home-actions { display: flex; gap: 8px; margin: 0 0 10px; }
+.home-actions .mini-btn { flex: 1; text-align: center; padding: 11px; }
+.home-actions .mini-btn.off { opacity: .5; }
+.tile.chosen { outline: 2px solid var(--accent); }
+.delsmall {
+  position: absolute; top: 8px; right: 8px; width: 26px; height: 26px;
+  border-radius: 50%; border: 1px solid var(--line); background: var(--bg);
+  color: var(--muted); font: inherit; font-size: 13px; line-height: 1; cursor: pointer;
+  padding: 0;
+}
+.delsmall.sel { color: transparent; }
+.delsmall.sel.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 700; }
+
+/* форма (создать / изменить) */
+.fl { display: block; font-size: 13px; color: var(--muted); margin: 14px 0 6px; }
+.chips { display: flex; gap: 8px; flex-wrap: wrap; }
+.chips .chip {
+  cursor: pointer; padding: 8px 13px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--text);
+  font: inherit; font-size: 14px;
+}
+.chips .chip.on { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+.fl + input, .org-panel input, .dl-row input, input[type=date], input[type=time],
+input#fTitle, input#fPer, input#fGoal, input#fHint {
+  width: 100%; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line);
+  background: var(--bg); color: var(--text); font-size: 15px; outline: none;
+  box-sizing: border-box;
+}
+.dl-row { display: flex; gap: 8px; }
 
 /* home */
-.tile { display: block; width: 100%; text-align: left; background: var(--card); border: none;
+.tile { display:block; position: relative; width: 100%; text-align: left; background: var(--card); border: none;
   color: var(--text); border-radius: 16px; padding: 14px; margin-bottom: 10px; cursor: pointer; font: inherit; }
 .tile .t { font-size: 17px; font-weight: 700; }
 .tile .s { color: var(--muted); font-size: 13px; margin-top: 4px; display: flex; gap: 10px; flex-wrap: wrap; }
