@@ -802,6 +802,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
         me = self.authorize()
+        if path == "/health":  # пульс для мониторинга bothost
+            return self.send_json({"ok": True, "port": PORT, "bot": bool(BOT_TOKEN)})
         if path.startswith("/api"):
             if not me:
                 return self.send_json({"error": "нужен Telegram initData"}, 401)
