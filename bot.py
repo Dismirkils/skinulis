@@ -333,9 +333,7 @@ def card_html(cid):
         else:
             mark = "⭕"
         names.append(mark + " " + html.escape(user_of(code)["name"]))
-    if c["anonymous"]:
-        who = "👥 %d уже, %d ждём 💀" % (len(paid), len(unpaid_codes(cid)))
-    elif names:
+    if names:
         who = ", ".join(names[:10])
         if len(names) > 10:
             who += " +ещё %d" % (len(names) - 10)
@@ -410,8 +408,6 @@ def build_view(cid, me_code):
             row["name"] = "Ты"
             if p:
                 row["amount"] = p["amount"]
-        elif c["anonymous"]:
-            row["name"] = None
         else:
             row["name"] = u["name"]
             row["username"] = u["username"]
@@ -589,7 +585,7 @@ def close_collection(cid, by, auto=False):
         c["closed_ts"] = time.time()
         paid = payments_of(cid)
         missed = unpaid_codes(cid)
-        names_missed = [user_of(m)["name"] for m in missed] if not c["anonymous"] else []
+        names_missed = [user_of(m)["name"] for m in missed]
         total = total_collected(cid)
         chat = c["chat_id"]
         save_state()
@@ -599,8 +595,6 @@ def close_collection(cid, by, auto=False):
             html.escape(c["title"]), len(paid), money(total, c["currency"]))
         if names_missed:
             text += "\n💀 Слились: " + html.escape(", ".join(names_missed))
-        elif c["anonymous"]:
-            text += "\nТихоня прячется 🙂"
         tg("sendMessage", chat_id=chat, text=text, parse_mode="HTML", disable_web_page_preview=True)
     update_card(cid)
     return True
@@ -634,7 +628,7 @@ def cmd_skor(msg, args):
     with LOCK:
         c = create_collection(
             title=title, chat_id=chat["id"], created_by=uid(msg["from"]),
-            per=o["per"], goal=o["goal"], until=o["until"], anon=o["anon"], cur=o["cur"],
+            per=o["per"], goal=o["goal"], until=o["until"], anon=False, cur=o["cur"],
         )
         cid = c["id"]
     update_card(cid)
@@ -681,7 +675,7 @@ def cmd_help(msg):
        text="💸 <b>Команды</b>\n\n"
             "<code>/skor Пицца по 400 до 25.10</code> — создать сбор в этом чате\n"
             "   <b>по 400</b> — с каждого; <b>на 5000</b> — общая сумма\n"
-            "   <b>до 25.10</b>/<b>25.10 20:00</b> — дедлайн; <b>анонимно</b> — суммы скрыть\n\n"
+            "   <b>до 25.10</b>/<b>25.10 20:00</b> — дедлайн\n\n"
             "/list — сборы в этом чате\n"
             "/close — закрыть свой последний сбор\n"
             "/create — создать сбор в мини-аппе (без привязки к чату)\n"
@@ -945,6 +939,11 @@ class Handler(BaseHTTPRequestHandler):
                                       per=per, goal=goal, until=until, cur="₽")
                 c["pay_hint"] = hint
                 cid = c["id"]
+                # кого сразу позвали при создании — тут же вписываем
+                for ucode in (body.get("codes") or [])[:20]:
+                    ucode = str(ucode)
+                    if ucode != code and ucode in STATE["users"] and ucode not in c["joined"]:
+                        c["joined"].append(ucode)
                 save_state()
             return self.send_json({"view": build_view(cid, code)})
 
@@ -1101,11 +1100,11 @@ class Handler(BaseHTTPRequestHandler):
                 with LOCK:
                     items = my_items(code)
                 return self.send_json({"items": items, "bot_username": bot_username or "skinulis_bot"})
-            mu = re.match(r"^/api/users/([a-z0-9_]+)$", path)
+            mu = re.match(r"^/api/users(?:/([a-z0-9_]+))?$", path)
             if mu:
                 cid = mu.group(1)
                 with LOCK:
-                    c = get_collection(cid)
+                    c = get_collection(cid) if cid else None
                     taken = set(c.get("joined") or []) if c else set()
                     if c:
                         taken.add(c["created_by"])

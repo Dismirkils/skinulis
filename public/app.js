@@ -13,6 +13,7 @@ const S = {
   coll: null,        // текущий сбор (view с сервера или демо)
   home: [],          // «мои сборы»
   addPool: undefined,// список, кого можно добавить (для организатора)
+  formPool: undefined,// кого можно позвать при создании сбора
   form: null,        // {mode:'create'|'edit', chip, data}
   introDone: localStorage.getItem('skinulis_intro_v2') === '1',
 };
@@ -90,14 +91,14 @@ const DEMO = () => ({
       id: 'c_demo02', title: 'Подарок Лене 💅', mode: 'per_person',
       per_person: 300, goal_total: null, currency: '₽',
       deadline: null, deadline_left: 'до 28.12 23:59',
-      anonymous: true, pay_hint: '',
+      anonymous: false, pay_hint: 'Перевод на карту мамы 🎁',
       status: 'active', is_organizer: false, me_state: 'none',
       organizer: { name: 'Матильда', username: 'mda' },
       paid_count: 2, unpaid_count: 1, total: 600,
       my_paid: false, my_amount: null, link: '#',
       roster: [
-        { id: 'x1', paid: true, name: null },
-        { id: 'x2', paid: true, name: null },
+        { id: 'x1', paid: true, name: 'Юля', username: 'ulya', amount: 300 },
+        { id: 'x2', paid: true, name: 'Костя', username: 'kostya', amount: 300 },
         { id: '900001', paid: false, name: 'Паша', username: 'pavel' },
       ],
     },
@@ -227,8 +228,13 @@ function renderHome() {
 function openCreate() {
   haptic();
   S.form = { mode: 'create', chip: 'per', data: {} };
+  S.formPool = 'loading';
   S.tab = 'form';
   render();
+  api('/api/users').then(r => {
+    S.formPool = (r.items || []).length ? r.items : 'empty';
+    if (S.tab === 'form') render();
+  }).catch(() => { S.formPool = 'empty'; if (S.tab === 'form') render(); });
 }
 
 function openEdit() {
@@ -280,12 +286,29 @@ function renderForm() {
       '</div>' +
       '<label class="fl">Куда скидывать (реквизиты, увидят участники)</label>' +
       '<input id="fHint" placeholder="СБП, карта, ссылка…" value="' + esc(d.pay_hint || '') + '">' +
+      (f.mode === 'create'
+        ? '<label class="fl">Пригласить сразу (кто откликнётся — в списке)</label>' + formPool()
+        : '') +
       '<button class="mini-btn go" id="fSave">' + (f.mode === 'create' ? 'Создать сбор 💸' : 'Сохранить') + '</button>' +
     '</div>' +
     (f.mode === 'create'
-      ? '<div class="foot">Сбор будет личным — только ты и те, кто откроет аппу.<br>' +
-        'Чтобы карточка висела в чате: /skor в чате командой → «Пицца по 400 до пт»</div>'
+      ? '<div class="foot">Сбор — твой: кидай ссылку друзьям 📤<br>' +
+        'Для карточки в чате: /skor Пицца по 400 до пт</div>'
       : '');
+}
+
+/* — пул «пригласить сразу» в форме создания — */
+function formPool() {
+  if (S.formPool === 'loading') return '<div class="sub">смотрю, кто зарегистрирован…</div>';
+  if (S.formPool === 'empty') return '<div class="sub">Пока некого вписать — после создания поделишься ссылкой 📤</div>';
+  if (Array.isArray(S.formPool) && S.formPool.length) {
+    return '<div class="addpool">' +
+      S.formPool.map(u =>
+        '<label class="urow"><input type="checkbox" data-user="' + esc(u.code) + '">' +
+        '<span>' + esc(u.name) + (u.username ? ' <i>@' + esc(u.username) + '</i>' : '') + '</span></label>'
+      ).join('') + '</div>';
+  }
+  return '<div class="sub">Некого вписать — ок, пригласишь потом 📤</div>';
 }
 
 /* — collection — */
@@ -303,7 +326,7 @@ function renderCollection(c) {
   let target;
   if (c.mode === 'per_person') {
     target = '<div class="big">' + money(c.per_person, c.currency) + '</div>' +
-             '<div class="sub">с каждого· скинулись ' + c.paid_count + ' ' + (!c.anonymous ? '· ждём ' + unpaid : '· есть тихони') + '</div>';
+             '<div class="sub">с каждого· скинулись ' + c.paid_count + ' · ждём ' + unpaid + '</div>';
   } else if (c.mode === 'total') {
     const pct = c.goal_total ? Math.min(100, Math.round(c.total / c.goal_total * 100)) : 0;
     target = '<div class="big">' + money(c.total, c.currency) +
@@ -329,24 +352,30 @@ function renderCollection(c) {
       '<div class="sub">Если передумал — кнопка ниже. Никто не осудит 🙂</div></div></div>' +
       '<div class="org-actions single"><button class="mini-btn ghost" id="joinMe">↩️ Вернуться в сбор</button></div></div>';
   } else if (st === 'none' && c.status === 'active') {
+    const primary = c.mode === 'per_person'
+      ? '<div class="org-actions"><button class="mini-btn go" id="payInline">💸 Я скинулся' +
+        (c.per_person ? ' ' + esc(c.per_person) + ' ' + esc(c.currency) : '') + '</button></div>' +
+        '<div class="org-actions">' +
+          '<button class="mini-btn ghost" id="joinMe">⭕ В деле, скину позже</button>' +
+          '<button class="mini-btn ghost" id="declineMe">🚫 Не мой расклад</button>' +
+        '</div>'
+      : '<div class="org-actions"><button class="mini-btn go" id="joinMe">⭕ В деле</button>' +
+        '<button class="mini-btn ghost" id="declineMe">🚫 Не участвую</button></div>';
     mine = '<div class="card"><h2>Ты участвуешь?</h2>' +
-      '<div class="sub">Нажми «В деле» — попадёшь в список участников. Отказался — видно всем 🚫</div>' +
-      '<div class="org-actions">' +
-        '<button class="mini-btn go" id="joinMe">💸 В деле</button>' +
-        '<button class="mini-btn ghost" id="declineMe">🚫 Не мой расклад</button>' +
-      '</div></div>';
+      '<div class="sub">Статус каждого виден всем: ✅ скинулся · ⭕ в деле · 🚫 отказался</div>' +
+      primary + '</div>';
   } else if (c.status === 'active') {
     mine = '<div class="card">' +
       '<div class="mystatus"><span class="emoji">💸</span>' +
       '<div><div class="big" style="font-size:22px">' +
         (c.mode === 'per_person' ? money(c.per_person, c.currency) : 'сколько не жалко') + '</div>' +
       '<div class="sub">' + (c.mode === 'per_person'
-        ? 'С тебя столько. Жми кнопку «Я скинулся» внизу'
-        : 'Введи сумму и жми кнопку внизу') + '</div></div></div>' +
+        ? 'С тебя столько. Отметишься — и галочка ✅ появится в списке'
+        : 'Введи сумму и подтверди') + '</div></div></div>' +
       (c.mode !== 'per_person' ? '<input class="free-input" id="amount" inputmode="numeric" placeholder="300">' : '') +
-      (tg ? '' : '<div style="margin-top:10px"><button class="mini-btn go" id="payFallback">Я скинулся ✅' +
-        (c.mode === 'per_person' && c.per_person ? ' ' + esc(c.per_person) + ' ' + esc(c.currency) : '') +
-        '</button><div class="sub" style="margin-top:6px">Кнопка внизу появится в Telegram</div></div>') +
+      '<div class="org-actions single"><button class="mini-btn go" id="payInline">💸 Я скинулся' +
+        (c.mode === 'per_person' && c.per_person ? ' ' + esc(c.per_person) + ' ' + esc(c.currency) : '') + '</button></div>' +
+      '<div class="sub" style="margin-top:4px">В Telegram эта кнопка дублируется внизу экрана</div>' +
       '<div class="org-actions single"><button class="mini-btn ghost" id="declineMe">🚫 Не участвую</button></div>' +
       '</div>';
   } else {
@@ -363,11 +392,10 @@ function renderCollection(c) {
 
   /* участники: ✅ скинулся · ⭕ в деле · 🚫 отказался */
   const rows = c.roster.map(r => {
-    const nm = r.me ? 'Ты' : (r.name ? esc(r.name) : '<i>скрыт</i>');
+    const nm = r.me ? 'Ты' : esc(r.name || '???');
     const amt = r.paid && r.amount != null ? '<span class="amt">' + esc(r.amount) + ' ' + esc(c.currency) + '</span>' : '';
-    const masked = (!r.me && !r.name) ? ' class="masked"' : '';
     const mark = r.declined ? '🚫' : (r.paid ? '✅' : '⭕');
-    return '<li' + (r.declined ? ' class="declined"' : '') + masked + '>' +
+    return '<li' + (r.declined ? ' class="declined"' : '') + '>' +
       '<span class="st">' + mark + '</span>' +
       '<span class="nm' + (r.me ? ' me' : '') + '">' + nm + '</span>' + amt + '</li>';
   }).join('');
@@ -417,8 +445,7 @@ function renderCollection(c) {
     '<div class="card">' + target + '</div>' +
     (c.deadline_left ? '<div class="card" style="text-align:center">⏳ <b>' + esc(c.deadline_left) + '</b></div>' : '') +
     mine + hint + roster + org + delRow +
-    '<div class="foot">Надёжный учёт без раскрытия чужих сумм' +
-      (c.anonymous ? ' · режим анонимности' : '') + '</div>';
+    '<div class="foot">Скинулись 💸 · честный учёт, видно кто и сколько скинул</div>';
 }
 
 /* ─────────── кнопки Telegram (MainButton / BackButton) */
@@ -512,6 +539,9 @@ async function submitForm() {
   const deadline = dy && dt ? dy + ' ' + dt : '';
   const hint = $('#fHint') ? $('#fHint').value.trim() : '';
   const data = { title: title, per_person: per, goal_total: goal, deadline: deadline, pay_hint: hint };
+  data.codes = (f.mode === 'create' && Array.isArray(S.formPool))
+    ? [...VIEW.querySelectorAll('.addpool input[type=checkbox]:checked')].map(i => i.dataset.user)
+    : [];
 
   const prettyDl = deadline ? 'до ' + dy.split('-').reverse().join('.') + ' ' + dt : '';
 
@@ -526,9 +556,12 @@ async function submitForm() {
       paid_count: 0, unpaid_count: 0, total: 0, my_paid: false, my_amount: null,
       roster: [{ id: '900000', paid: false, me: true, name: 'Ты' }], link: '#',
     };
+    (Array.isArray(S.formPool) ? S.formPool.filter(u => data.codes.includes(u.code)) : [])
+      .forEach(u => view.roster.push({ id: u.code, paid: false, name: u.name }));
+    view.unpaid_count = view.roster.length;
     if (f.mode === 'create') {
       S.home.unshift({ id: id, title: title, deadline_left: prettyDl, my_paid: false,
-        currency: '₽', paid_count: 0, unpaid_count: 0, is_organizer: true });
+        currency: '₽', paid_count: 0, unpaid_count: view.unpaid_count, is_organizer: true });
       S.coll = view;
       beepOk(); toast('Демо: сбор создан 💸');
     } else {
@@ -559,7 +592,7 @@ async function submitForm() {
 }
 
 document.addEventListener('click', async (ev) => {
-  if (ev.target.id === 'payFallback') return markPaid();
+  if (ev.target.id === 'payFallback' || ev.target.id === 'payInline') return markPaid();
 
   /* крестик удаления на плитке: раньше навигации — он окружён плиткой */
   const delBtn = ev.target.closest('[data-del]');
