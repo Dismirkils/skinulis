@@ -995,6 +995,20 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             self.send_json({"error": "not_found"}, 404)
             return
+        if fname == "index.html":
+            # всё в один запрос: CSS и JS инлайнятся — нахрени слабому LTE качать 3 файла
+            try:
+                with open(os.path.join(PUBLIC_DIR, "style.css"), "rb") as f:
+                    css = f.read()
+                with open(os.path.join(PUBLIC_DIR, "app.js"), "rb") as f:
+                    js = f.read()
+                body = body.replace(
+                    b'<link rel="stylesheet" href="/app/style.css">',
+                    b'<style>' + css + b'</style>')
+                body = re.sub(rb'<script src="/app/app\.js[^"]*"></script>',
+                              b'<script>' + js + b'</script>', body)
+            except OSError:
+                pass
         self.send_response(200)
         self.send_header("Content-Type", self.MIME.get(ext, "application/octet-stream"))
         self.send_header("Content-Length", str(len(body)))
