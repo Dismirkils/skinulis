@@ -109,8 +109,9 @@ const DEMO = () => ({
   async function boot() {
     try {
       if (tg) {
-        tg.expand();
-        tg.setHeaderColor('secondary_bg_color');
+        if (tg.ready) tg.ready();
+        if (tg.expand) tg.expand();
+        if (tg.setHeaderColor) tg.setHeaderColor('secondary_bg_color');
         // под системными «‹» и «✕» Telegram не должно ничего наезжать
         document.body.classList.add('intg');
       }
@@ -426,26 +427,30 @@ function renderCollection(c) {
 
 function renderButtons() {
   if (!tg) return;
+  const back = tg.BackButton, main = tg.MainButton;
 
   if (S.tab === 'home') {
-    tg.BackButton.hide();
-    tg.MainButton.hide();
+    if (back) back.hide();
+    if (main) main.hide();
     return;
   }
   if (S.tab === 'form') {
-    tg.BackButton.show();
-    tg.MainButton.hide();
+    if (back) back.show();
+    if (main) main.hide();
     return;
   }
   const c = S.coll;
-  tg.BackButton.show();
+  if (back) back.show();
   if (c.status === 'active' && meStateOf(c) === 'waiting') {
     const sum = c.mode === 'per_person' && c.per_person ? ' ' + c.per_person + ' ' + c.currency : '';
-    tg.MainButton.setText('Я скинулся ✅' + (sum ? sum : ''));
-    tg.MainButton.show();
-    tg.MainButton.onClick(markPaid);
+    if (main) {
+      if (main.offClick) try { main.offClick(markPaid); } catch (e) {}
+      if (main.setText) main.setText('Я скинулся ✅' + (sum ? sum : ''));
+      main.onClick(markPaid);
+      main.show();
+    }
   } else {
-    tg.MainButton.hide();
+    if (main) main.hide();
   }
 }
 
@@ -677,7 +682,7 @@ document.addEventListener('click', async (ev) => {
     const msg = 'Вас пригласили в сбор «' + c.title + '» 💸 Загляни — и скажи, ты в деле или нет.';
     const url = 'https://t.me/share/url?url=' + encodeURIComponent('https://t.me/' + S.bot + '?startapp=' + c.id) +
       '&text=' + encodeURIComponent(msg);
-    if (tg) tg.openTelegramLink(url);
+    if (tg && tg.openTelegramLink) tg.openTelegramLink(url);
     else {
       const full = 'https://t.me/' + S.bot + '?startapp=' + c.id;
       try { await navigator.clipboard.writeText(full); toast('Ссылка скопирована'); } catch (e) {}
@@ -685,7 +690,7 @@ document.addEventListener('click', async (ev) => {
   }
 });
 
-if (tg) tg.BackButton.onClick(() => {
+if (tg && tg.BackButton) tg.BackButton.onClick(() => {
   if (S.tab === 'form') { S.tab = S.coll ? 'collection' : 'home'; S.form = null; render(); return; }
   navHome();
 });
