@@ -154,7 +154,7 @@ function toTile(c) {
     id: c.id, title: c.title, deadline_left: c.deadline_left,
     my_paid: c.my_paid, currency: c.currency,
     paid_count: c.paid_count, unpaid_count: c.unpaid_count,
-    is_organizer: !!c.is_organizer,
+    is_organizer: !!c.is_organizer, status: c.status || 'active',
   };
 }
 
@@ -203,13 +203,15 @@ function render() {
 /* — home — */
 function renderHome() {
   const tiles = S.home.length ? S.home.map(t => {
-    return '<div class="tile" data-nav="' + esc(t.id) + '">' +
+    const closed = t.status === 'closed';
+    return '<div class="tile' + (closed ? ' done' : '') + '" data-nav="' + esc(t.id) + '">' +
       (t.is_organizer ? '<button class="delsmall" data-del="' + esc(t.id) + '" title="Удалить">✕</button>' : '') +
-      '<div class="t">' + (t.my_paid ? '✅ ' : '💸 ') + esc(t.title) + '</div>' +
+      '<div class="t">' + (closed ? '🏁 ' : (t.my_paid ? '✅ ' : '💸 ')) + esc(t.title) + '</div>' +
       '<div class="s">' +
-        (t.deadline_left ? '<span>' + esc(t.deadline_left) + '</span>' : '') +
+        (closed ? '<span>итог подведён</span>' :
+          (t.deadline_left ? '<span>' + esc(t.deadline_left) + '</span>' : '')) +
         '<span>👍 ' + t.paid_count + '</span>' +
-        (t.unpaid_count ? '<span class="unpaid">💀 ждём: ' + t.unpaid_count + '</span>' : '') +
+        (!closed && t.unpaid_count ? '<span class="unpaid">💀 ждём: ' + t.unpaid_count + '</span>' : '') +
       '</div>' +
     '</div>';
   }).join('')

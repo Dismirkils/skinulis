@@ -293,10 +293,14 @@ def parse_deadline(iso):
         return None
     try:
         if len(iso) > 16:
-            return datetime.strptime(iso, "%Y-%m-%d %H:%M %z")
-        return datetime.strptime(iso, "%Y-%m-%d %H:%M").astimezone()
+            d = datetime.strptime(iso, "%Y-%m-%d %H:%M %z")
+        else:
+            d = datetime.strptime(iso, "%Y-%m-%d %H:%M").astimezone()
     except (ValueError, TypeError):
         return None
+    # юзер выбирает минуты без секунд: считаем дедлайном середину минуты +29 с,
+    # иначе «07:47», поставленный на 07:47:50, сразу «прошёл»
+    return d + timedelta(seconds=29)
 
 
 def deadline_left(iso):
@@ -311,11 +315,13 @@ def deadline_left(iso):
     secs = left.total_seconds()
     if secs <= 0:
         return pretty + " (прошёл)", True
+    if secs < 60:
+        return pretty + " (меньше минуты)", False
     if secs < 3600:
-        return pretty + " (%d мин)" % (secs // 60), False
+        return pretty + " (%d мин)" % max(1, round(secs / 60)), False
     if secs < 86400:
-        return pretty + " (%d ч)" % (secs // 3600), False
-    return pretty + " (%d д)" % (secs // 86400), False
+        return pretty + " (%d ч)" % max(1, round(secs / 3600)), False
+    return pretty + " (%d д)" % max(1, round(secs / 86400)), False
 
 
 # ────────────────────────────────────────────────── карточка в чате
@@ -464,8 +470,6 @@ def build_view(cid, me_code):
 def my_items(me_code):
     items = []
     for c in STATE["collections"].values():
-        if c["status"] != "active":
-            continue
         paid = payments_of(c["id"])
         if me_code not in paid and me_code not in members_of(c["id"]):
             continue
@@ -475,8 +479,10 @@ def my_items(me_code):
             "my_paid": me_code in paid, "currency": c["currency"],
             "paid_count": len(paid), "unpaid_count": len(unpaid_codes(c["id"])),
             "is_organizer": c["created_by"] == me_code,
+            "status": c["status"],
         })
-    items.sort(key=lambda x: x["deadline_left"] == "")
+    # активные сверху, завершённые снизу; внутри — ближайший дедлайн первым
+    items.sort(key=lambda x: (x["status"] != "active", x["deadline_left"] == ""))
     return items
 
 
@@ -667,19 +673,18 @@ def final_text(cid, c, n_paid, total, missed):
 
 
 def finalize(cid):
-    """Все, кто не отказался, скинулись (или план набран) → сбор сам закрывается."""
+    """mode=total — закрываем только когда набрана цель; иначе — когда все, кто не отказался, скинулись."""
     with LOCK:
         c = get_collection(cid)
         if not c or c["status"] != "active":
             return
         if not payments_of(cid):
             return
-        waiting = unpaid_codes(cid)
-        if waiting:
-            goal_ok = c["mode"] == "total" and c["goal_total"] \
-                and total_collected(cid) >= c["goal_total"]
-            if not goal_ok:
-                return
+        if c["mode"] == "total" and c["goal_total"]:
+            if total_collected(cid) < c["goal_total"]:
+                return  # план не набран — сбор живёт, даже если все отметились
+        elif unpaid_codes(cid):
+            return  # остались должники — живём
     close_collection(cid, auto=True)
 
 
