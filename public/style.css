@@ -1,4 +1,4 @@
-/* Скинулись — мини-аппа. Цвета берутся из темы Telegram с фолбэками. */
+/* Скинулись — фронт бота. Цвета берутся из темы Telegram с фолбэками. */
 :root {
   --bg: var(--tg-theme-bg-color, #18181f);
   --card: var(--tg-theme-secondary-bg-color, #20202a);
@@ -28,6 +28,9 @@ body {
 
 /* ── шапка */
 .top { display: flex; align-items: center; gap: 10px; margin: 4px 0 14px; }
+/* внутри Telegram поверх правого верхнего угла висит его системная кнопка закрытия —
+   отступаем, чтобы крестик не ложился на бейдж «активен» и кнопки */
+.intg .top { padding-top: 44px; }
 .back {
   width: 34px; height: 34px; border-radius: 50%; border: none; background: var(--card);
   color: var(--text); font-size: 18px; cursor: pointer; flex: none; display: none;

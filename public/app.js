@@ -1,4 +1,4 @@
-/* «Скинулись» — мини-аппа. Ванила JS, один файл. */
+/* «Скинулись» — фронт бота. Ванила JS, один файл. */
 'use strict';
 
 const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
@@ -12,7 +12,7 @@ const S = {
   tab: 'home',       // home | collection | form
   coll: null,        // текущий сбор (view с сервера или демо)
   home: [],          // «мои сборы»
-  formPool: undefined,// кого можно позвать при создании сбора
+  formPool: undefined,
   form: null,        // {mode:'create'|'edit', chip, data}
   introDone: localStorage.getItem('skinulis_intro_v2') === '1',
 };
@@ -110,6 +110,8 @@ async function boot() {
   if (tg) {
     tg.expand();
     tg.setHeaderColor('secondary_bg_color');
+    // под системными «‹» и «✕» Telegram не должно ничего наезжать
+    document.body.classList.add('intg');
   }
   const startParam = (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param)
     || new URLSearchParams(location.search).get('startapp')
@@ -229,13 +231,9 @@ function renderHome() {
 function openCreate() {
   haptic();
   S.form = { mode: 'create', chip: 'per', data: {} };
-  S.formPool = 'loading';
+  S.formPool = undefined;
   S.tab = 'form';
   render();
-  api('/api/users').then(r => {
-    S.formPool = (r.items || []).length ? r.items : 'empty';
-    if (S.tab === 'form') render();
-  }).catch(() => { S.formPool = 'empty'; if (S.tab === 'form') render(); });
 }
 
 function openEdit() {
@@ -287,29 +285,12 @@ function renderForm() {
       '</div>' +
       '<label class="fl">Куда скидывать (реквизиты, увидят участники)</label>' +
       '<input id="fHint" placeholder="СБП, карта, ссылка…" value="' + esc(d.pay_hint || '') + '">' +
-      (f.mode === 'create'
-        ? '<label class="fl">Пригласить сразу (кто откликнётся — в списке)</label>' + formPool()
-        : '') +
       '<button class="mini-btn go" id="fSave">' + (f.mode === 'create' ? 'Создать сбор 💸' : 'Сохранить') + '</button>' +
     '</div>' +
     (f.mode === 'create'
       ? '<div class="foot">Сбор — твой: кидай ссылку друзьям 📤<br>' +
         'Для карточки в чате: /skor Пицца по 400 до пт</div>'
       : '');
-}
-
-/* — пул «пригласить сразу» в форме создания — */
-function formPool() {
-  if (S.formPool === 'loading') return '<div class="sub">смотрю, кто зарегистрирован…</div>';
-  if (S.formPool === 'empty') return '<div class="sub">Пока некого вписать — после создания поделишься ссылкой 📤</div>';
-  if (Array.isArray(S.formPool) && S.formPool.length) {
-    return '<div class="addpool">' +
-      S.formPool.map(u =>
-        '<label class="urow"><input type="checkbox" data-user="' + esc(u.code) + '">' +
-        '<span>' + esc(u.name) + (u.username ? ' <i>@' + esc(u.username) + '</i>' : '') + '</span></label>'
-      ).join('') + '</div>';
-  }
-  return '<div class="sub">Некого вписать — ок, пригласишь потом 📤</div>';
 }
 
 /* — collection — */
@@ -530,9 +511,6 @@ async function submitForm() {
   }
   const hint = $('#fHint') ? $('#fHint').value.trim() : '';
   const data = { title: title, per_person: per, goal_total: goal, deadline: deadline, pay_hint: hint };
-  data.codes = (f.mode === 'create' && Array.isArray(S.formPool))
-    ? [...VIEW.querySelectorAll('.addpool input[type=checkbox]:checked')].map(i => i.dataset.user)
-    : [];
 
   const prettyDl = deadline ? 'до ' + dy.split('-').reverse().join('.') + ' ' + dt : '';
 
@@ -547,8 +525,6 @@ async function submitForm() {
       paid_count: 0, unpaid_count: 0, total: 0, my_paid: false, my_amount: null,
       roster: [{ id: '900000', paid: false, me: true, name: 'Ты' }], link: '#',
     };
-    (Array.isArray(S.formPool) ? S.formPool.filter(u => data.codes.includes(u.code)) : [])
-      .forEach(u => view.roster.push({ id: u.code, paid: false, name: u.name }));
     view.unpaid_count = view.roster.length;
     if (f.mode === 'create') {
       S.home.unshift({ id: id, title: title, deadline_left: prettyDl, my_paid: false,

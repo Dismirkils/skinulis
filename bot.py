@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-«Скинулись» — бот + мини-аппа для общих сборов в Telegram-чатах.
+«Скинулись» — бот + приложение бота для общих сборов в Telegram-чатах.
 
 Чистый Python 3.9+, ноль зависимостей.
-  bot/  <- этот файл: бот + HTTP-сервер + мини-аппа-бэкенд + напоминания
-  public/  — фронт мини-аппы
+  bot/  <- этот файл: бот + HTTP-сервер + приложение бота-бэкенд + напоминания
+  public/  — фронт приложения бота
   data/state.json — всё состояние (分钟即可 понять содержимое)
 
 Запуск:
     BOT_TOKEN=123:abc python3 bot.py
 
-Без BOT_TOKEN работает только веб-часть (мини-аппа + API) — удобно смотреть
+Без BOT_TOKEN работает только веб-часть (приложение бота + API) — удобно смотреть
 в браузере как демо.
 """
 
@@ -132,27 +132,49 @@ def deep_link(start):
 # ────────────────────────────────────────────────── initData (HMAC)
 
 def validate_init_data(init_data):
+    """Подпись Telegram. data_check_string считаем по «сырым» парам (как их отдал ТГ);
+    на всякий случай пробуем и декодированный вариант — старые клиенты энкодили иначе."""
     if not init_data:
         return None
-    try:
-        parsed = dict(urllib.parse.parse_qsl(init_data, keep_blank_values=True))
-    except Exception:
+
+    def check(pairs, user_pairs):
+        d = {}
+        hash_ = None
+        for k, v in pairs:
+            if k == "hash":
+                hash_ = v
+                continue
+            d[k] = v
+        if not hash_:
+            return None
+        dcs = "\n".join("%s=%s" % (k, v) for k, v in sorted(d.items()))
+        secret = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
+        if not hmac.compare_digest(hmac.new(secret, dcs.encode(), hashlib.sha256).hexdigest(), hash_):
+            return None
+        auth_date = int(d.get("auth_date", "0") or 0)
+        if auth_date and time.time() - auth_date > 86400 * 3:
+            return None
+        uj = dict(user_pairs).get("user") or ""
+        for candidate in (urllib.parse.unquote(uj), uj):  # user — url-encoded JSON
+            try:
+                u = json.loads(candidate)
+                if isinstance(u, dict):
+                    return u
+            except Exception:
+                continue
         return None
-    check_hash = parsed.pop("hash", None)
-    if not check_hash:
-        return None
-    dcs = "\n".join("%s=%s" % (k, parsed[k]) for k in sorted(parsed))
-    secret = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
-    good = hmac.new(secret, dcs.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(good, check_hash):
-        return None
-    auth_date = int(parsed.get("auth_date", "0") or 0)
-    if auth_date and time.time() - auth_date > 86400 * 3:
-        return None
-    try:
-        return json.loads(parsed.get("user", "{}"))
-    except Exception:
-        return None
+
+    # 1) сырые пары, как их прислал Telegram
+    raw_pairs = [tuple(x.split("=", 1)) for x in init_data.split("&") if "=" in x]
+    res = check(raw_pairs, raw_pairs)
+    # 2) запасной путь: декодированные значения (старый вариант проверки)
+    if not res:
+        try:
+            dec_pairs = urllib.parse.parse_qsl(init_data, keep_blank_values=True)
+            res = check(dec_pairs, dec_pairs)
+        except Exception:
+            return None
+    return res if isinstance(res, dict) else None
 
 
 # ────────────────────────────────────────────────── разбор /skor
@@ -407,7 +429,7 @@ def update_card(cid):
         save_state()
 
 
-# ────────────────────────────────────────────────── веб-вью (для мини-аппы)
+# ────────────────────────────────────────────────── веб-вью (для приложения бота)
 
 def build_view(cid, me_code):
     c = STATE["collections"].get(cid)
@@ -700,7 +722,7 @@ def cmd_start(msg):
             "2️⃣ <b>Кинешь ссылку друзьям</b> — они откроют и скажут: «в деле» или «не участвую»\n"
             "3️⃣ Каждый скинулся — жмёт кнопку, и <b>все видят, кто сколько скинул</b> ✅\n"
             "4️⃣ Собрали всё — бот объявит итог 🎉\n\n"
-            "Всё в мини-аппе: не надо писать никому в личку, суммы и статусы — на одном экране.\n\n"
+            "Всё в боте: не надо писать никому в личку, суммы и статусы — на одном экране.\n\n"
             "Жми кнопку 👇",
        parse_mode="HTML",
         reply_markup={"inline_keyboard": [
@@ -766,7 +788,7 @@ def cmd_help(msg):
             "   <b>до 25.10</b>/<b>25.10 20:00</b> — дедлайн\n\n"
             "/list — сборы в этом чате\n"
             "/close — закрыть свой последний сбор\n"
-            "/create — создать сбор в мини-аппе (без привязки к чату)\n"
+            "/create — создать сбор в боте (без привязки к чату)\n"
             "/delete — удалить свой сбор (на выбор)\n"
             "/edit — поменять название, сумму или дедлайн\n\n"
             "Что-то пошло не так? Пиши организатору напрямую 🙂",
@@ -775,7 +797,7 @@ def cmd_help(msg):
 
 def cmd_create(msg):
     tg("sendMessage", chat_id=msg["chat"]["id"],
-       text="Создать сбор можно в мини-аппе — жми кнопку 👇\n\n"
+       text="Создать сбор можно прямо в боте — жми кнопку 👇\n\n"
             "<i>Если сбор нужен именно в этом чате (с карточкой для всех) — "
             "<code>/skor Пицца по 400 до пт</code></i>",
        parse_mode="HTML",
@@ -869,10 +891,10 @@ def handle_update(upd):
     chat_type = msg["chat"]["type"]
     text = (msg.get("text") or "").strip()
     if not text.startswith("/"):
-        # мини-аппа работает в своём окне — лично боту писать не нужно
+        # приложение бота работает в своём окне — лично боту писать не нужно
         if msg["chat"]["type"] == "private":
             tg("sendMessage", chat_id=msg["chat"]["id"],
-               text="Я не отвечаю на сообщения 🙂 Вся работа — внутри мини-аппы.",
+               text="Я не отвечаю на сообщения 🙂 Вся работа — внутри бота.",
                reply_markup={"inline_keyboard": [[
                    {"text": "＋ Создать сбор 💸", "url": deep_link("new")},
                ]]},
@@ -1026,11 +1048,6 @@ class Handler(BaseHTTPRequestHandler):
                                       per=per, goal=goal, until=until, cur="₽")
                 c["pay_hint"] = hint
                 cid = c["id"]
-                # кого сразу позвали при создании — тут же вписываем
-                for ucode in (body.get("codes") or [])[:20]:
-                    ucode = str(ucode)
-                    if ucode != code and ucode in STATE["users"] and ucode not in c["joined"]:
-                        c["joined"].append(ucode)
                 save_state()
             return self.send_json({"view": build_view(cid, code)})
 
@@ -1225,24 +1242,22 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"items": items, "bot_username": bot_username or "skinulis_bot"})
             mu = re.match(r"^/api/users(?:/([a-z0-9_]+))?$", path)
             if mu:
-                cid = mu.group(1)
-                with LOCK:
-                    c = get_collection(cid) if cid else None
-                    taken = set(c.get("joined") or []) if c else set()
-                    if c:
-                        taken.add(c["created_by"])
-                        taken |= set(payments_of(cid).keys())
-                    ppl = [{"code": k, "name": v.get("name") or "???",
-                            "username": v.get("username") or ""}
-                           for k, v in sorted(STATE["users"].items())
-                           if k != code and k not in taken]
-                return self.send_json({"items": ppl})
+                # приватность: пул «кого позвать» вырезан — звать можно только ссылкой
+                return self.send_json({"error": "звать можно только ссылкой"}, 404)
             m = re.match(r"^/api/c/([a-z0-9_]+)$", path)
             if m:
                 with LOCK:
-                    v = build_view(m.group(1), code)
-                if not v:
-                    return self.send_json({"error": "нет такого сбора"}, 404)
+                    cid = m.group(1)
+                    c = get_collection(cid)
+                    if not c:
+                        return self.send_json({"error": "нет такого сбора"}, 404)
+                    dec = set(c.get("declined") or [])
+                    if code != c["created_by"] and code not in members_of(cid) \
+                            and code not in dec:
+                        # приватность: без ссылки от организатора чужие сборы не видны
+                        return self.send_json(
+                            {"error": "Нет доступа — открой сбор по ссылке от организатора"}, 403)
+                    v = build_view(cid, code)
                 return self.send_json(v)
             return self.send_json({"error": "not_found"}, 404)
         return self.serve_static(path)
@@ -1298,16 +1313,28 @@ BOT_COMMANDS = [
     ("skor",   "Создать сбор в этом чате"),
     ("list",   "Сборы этого чата"),
     ("close",  "Закрыть свой последний сбор"),
-    ("create", "Создать сбор в мини-аппе"),
+    ("create", "Создать сбор в боте"),
     ("delete", "Удалить свой сбор"),
     ("edit",   "Изменить название, сумму, дедлайн"),
 ]
+
+
+WEBAPP_URL = os.environ.get(
+    "WEBAPP_URL", "https://bot-1792527651-5464-faslor.bothost.tech/app")
 
 
 def register_commands():
     if BOT_TOKEN:
         tg("setMyCommands", commands=[{"command": c, "description": d} for c, d in BOT_COMMANDS])
         log.info("Меню команд обновлено: %s", ", ".join("/" + c for c, _ in BOT_COMMANDS))
+        # без этого кнопка меню не открывает нашу приложение бота и ссылки ?startapp= у
+        # чужих людей кидают их просто в чат с ботом
+        ok = tg("setChatMenuButton",
+                menu_button={"type": "web_app", "text": "💸 Скинулись", "web_app": {"url": WEBAPP_URL}})
+        if ok:
+            log.info("Кнопка меню бота открыта на приложение бота: %s", WEBAPP_URL)
+        else:
+            log.warning("setChatMenuButton не сработал — ссылки ?startapp= могут не открывать аппу")
 
 
 def main():
