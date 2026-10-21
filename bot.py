@@ -1263,8 +1263,7 @@ class Handler(BaseHTTPRequestHandler):
         return self.serve_static(path)
 
     def log_message(self, fmt, *args):
-        if "api" in (args[0] if args else ""):
-            log.info(fmt % args)
+        log.info(fmt % args)
 
 
 # ────────────────────────────────────────────────── демо-данные

@@ -106,42 +106,52 @@ const DEMO = () => ({
 
 /* ─────────── boot */
 
-async function boot() {
-  if (tg) {
-    tg.expand();
-    tg.setHeaderColor('secondary_bg_color');
-    // под системными «‹» и «✕» Telegram не должно ничего наезжать
-    document.body.classList.add('intg');
-  }
-  const startParam = (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param)
-    || new URLSearchParams(location.search).get('startapp')
-    || 'home';
+  async function boot() {
+    try {
+      if (tg) {
+        tg.expand();
+        tg.setHeaderColor('secondary_bg_color');
+        // под системными «‹» и «✕» Telegram не должно ничего наезжать
+        document.body.classList.add('intg');
+      }
+      const startParam = (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param)
+        || new URLSearchParams(location.search).get('startapp')
+        || 'home';
 
-  try {
-    const r = await api('/api/init', {
-      method: 'POST',
-      body: JSON.stringify({ start_param: startParam }),
-      headers: Object.assign(
-        tg && tg.initData ? { 'Authorization': 'tma ' + tg.initData } : {},
-        { 'Content-Type': 'application/json' }
-      ),
-    });
-    S.user = r.user; S.bot = r.bot_username;
-    if (r.collection) { S.tab = 'collection'; S.coll = r.collection; }
-  } catch (e) {
-    const d = DEMO();
-    S.user = d.demoUser; S.demo = true;
-    $('#banner').hidden = false;
-    if (startParam.startsWith('c_')) {
-      S.tab = 'collection';
-      S.coll = d.collections.find(c => c.id === startParam) || d.collections[0];
+      try {
+        const r = await api('/api/init', {
+          method: 'POST',
+          body: JSON.stringify({ start_param: startParam }),
+          headers: Object.assign(
+            tg && tg.initData ? { 'Authorization': 'tma ' + tg.initData } : {},
+            { 'Content-Type': 'application/json' }
+          ),
+        });
+        S.user = r.user; S.bot = r.bot_username;
+        if (r.collection) { S.tab = 'collection'; S.coll = r.collection; }
+      } catch (e) {
+        const d = DEMO();
+        S.user = d.demoUser; S.demo = true;
+        $('#banner').hidden = false;
+        $('#banner').textContent = '🧪 Демо-режим — так это выглядит в Telegram';
+        if (startParam.startsWith('c_')) {
+          S.tab = 'collection';
+          S.coll = d.collections.find(c => c.id === startParam) || d.collections[0];
+        }
+      }
+
+      await loadHome();
+      render();
+      if (!S.introDone) showIntro();
+    } catch (e) {
+      // никакого «белого экрана»: ошибка сразу на экране
+      const b = $('#banner');
+      if (b) { b.hidden = false; b.textContent = '💥 ' + (e && e.message ? e.message : 'ошибка загрузки'); }
+      document.body.insertAdjacentHTML('beforeend',
+        '<div style="padding:20px;font-size:14px;color:#fff">Не открылось: ' +
+        esc(String(e && (e.stack || e.message) || e)).slice(0, 400) + '</div>');
     }
   }
-
-  await loadHome();
-  render();
-  if (!S.introDone) showIntro();
-}
 
 async function loadHome() {
   if (S.demo) { S.home = DEMO().collections.map(toTile); return; }

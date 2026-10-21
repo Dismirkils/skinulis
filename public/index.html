@@ -6,11 +6,20 @@
 <title>Скинулись 💸</title>
 <link rel="stylesheet" href="/app/style.css">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script>
+/* до всего: любые падения — сразу на экране, а не «белый экран» */
+window.addEventListener('error', function (e) {
+  var b = document.getElementById('banner');
+  if (!b) return;
+  b.hidden = false;
+  b.textContent = '💥 ' + (e.message ? e.message : 'ошибка загрузки');
+});
+</script>
 </head>
 <body>
 <div id="banner" class="banner" hidden>🧪 Демо-режим — так это выглядит в Telegram</div>
 <main id="view"></main>
 <div id="toast" class="toast" hidden></div>
-<script src="/app/app.js"></script>
+<script src="/app/app.js?v=5"></script>
 </body>
 </html>
