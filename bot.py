@@ -28,7 +28,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -287,12 +287,26 @@ def money(n, cur="₽"):
     return "%d %s" % (n, cur)
 
 
+def parse_deadline(iso):
+    """aware-дата из строки дедлайна. Строка «… +0300» — как отдал фронт (локальная зона юзера)."""
+    if not iso:
+        return None
+    try:
+        if len(iso) > 16:
+            return datetime.strptime(iso, "%Y-%m-%d %H:%M %z")
+        return datetime.strptime(iso, "%Y-%m-%d %H:%M").astimezone()
+    except (ValueError, TypeError):
+        return None
+
+
 def deadline_left(iso):
     """('до 28.10 20:00 (2 д 3 ч)', left|None)"""
     if not iso:
         return "", None
-    d = datetime.strptime(iso, "%Y-%m-%d %H:%M")
-    left = d - datetime.now()
+    d = parse_deadline(iso)
+    if not d:
+        return "", None
+    left = d - datetime.now(d.tzinfo)
     pretty = "до " + d.strftime("%d.%m %H:%M")
     secs = left.total_seconds()
     if secs <= 0:
@@ -503,8 +517,16 @@ def valid_amount(v):
 
 
 def valid_deadline(v):
+    """Дедлайн «YYYY-MM-DD HH:MM» (можно с «±HHMM» — локальная зона юзера) или None/bad_date."""
     if not v:
         return None
+    v = str(v).strip()
+    if len(v) > 16:
+        try:
+            datetime.strptime(v, "%Y-%m-%d %H:%M %z")
+            return v
+        except (TypeError, ValueError):
+            return "bad_date"
     try:
         datetime.strptime(v, "%Y-%m-%d %H:%M")
     except (TypeError, ValueError):
@@ -550,8 +572,9 @@ def tick_collection(cid):
         debtors = [u for u in unpaid_codes(cid) if u != c["created_by"]]
         left = None
         if c["deadline"]:
-            dl = datetime.strptime(c["deadline"], "%Y-%m-%d %H:%M")
-            left = dl - datetime.now()
+            dl = parse_deadline(c["deadline"])
+            if dl:
+                left = dl - datetime.now(dl.tzinfo)
         age_h = (time.time() - c["created_ts"]) / 3600
 
     if left is not None:
@@ -579,6 +602,19 @@ def tick_collection(cid):
         nag(cid, c["created_by"], "stale", "👋 Сбор «%s» висит 2 недельки. Если он уже не нужен — закрой: /close" % c["title"])
 
 
+def people_word(n):
+    """1 человек / 2 человека / 5 человек."""
+    n = abs(int(n)) % 100
+    if 11 <= n <= 14:
+        return "человек"
+    n %= 10
+    if n == 1:
+        return "человек"
+    if 2 <= n <= 4:
+        return "человека"
+    return "человек"
+
+
 def close_collection(cid, by=None, auto=False):
     with LOCK:
         c = get_collection(cid)
@@ -596,23 +632,38 @@ def close_collection(cid, by=None, auto=False):
         save_state()
 
     if chat and BOT_TOKEN:
-        text = "🏁 <b>«%s» — итог</b>\nСкинулись: %d (сумма %s)" % (
-            html.escape(c["title"]), len(paid), money(total, c["currency"]))
-        if names_missed:
-            text += "\n💀 Слились: " + html.escape(", ".join(names_missed))
+        text = final_text(cid, c, len(paid), total, names_missed)
         tg("sendMessage", chat_id=chat, text=text, parse_mode="HTML", disable_web_page_preview=True)
     elif not chat and BOT_TOKEN:
-        # сбор без чата (создан в аппе) — усилиям его участников пусть приходит личный итог
-        head = "🏁 <b>«%s» — итог</b>\nСобрано %s от %d %s" % (
-            html.escape(c["title"]), money(total, c["currency"]), len(paid),
-            "человека" if len(paid) in (2, 3, 4) and len(paid) % 10 in (2, 3, 4) else "человек")
-        if names_missed:
-            head += "\nНе отметились: " + html.escape(", ".join(names_missed))
+        # сбор без чата (создан в аппе) — чтобы люди знали, итог приходит в личку каждому
+        text = final_text(cid, c, len(paid), total, names_missed)
         for m in set(paid.keys()) | {c["created_by"]}:
-            tg("sendMessage", chat_id=int(m), text=head, parse_mode="HTML",
+            tg("sendMessage", chat_id=int(m), text=text, parse_mode="HTML",
                disable_web_page_preview=True)
     update_card(cid)
     return True
+
+
+def final_text(cid, c, n_paid, total, missed):
+    title = html.escape(c["title"])
+    # missed может прийти кодами — переводим в имена
+    missed = [user_of(x)["name"] if str(x).isdigit() else str(x) for x in missed]
+    paid_names = []
+    for code, p in sorted(payments_of(cid).items(), key=lambda kv: kv[1]["paid_ts"]):
+        nm = user_of(code)["name"]
+        paid_names.append("%s — %s" % (html.escape(nm), money(p["amount"], c["currency"])))
+    if missed:
+        text = ("🏁 <b>«%s» — итог</b>\n💰 Собрано %s от %d %s" % (
+            title, money(total, c["currency"]), n_paid, people_word(n_paid)))
+        if paid_names:
+            text += "\n✅ " + ", ".join(paid_names)
+        text += "\n⏳ Не отметились: " + html.escape(", ".join(missed))
+    else:
+        text = ("🎉 <b>«%s» — всё собрано!</b>\n💰 %s от %d %s" % (
+            title, money(total, c["currency"]), n_paid, people_word(n_paid)))
+        if paid_names:
+            text += "\n✅ " + ", ".join(paid_names)
+    return text
 
 
 def finalize(cid):
@@ -637,20 +688,20 @@ def finalize(cid):
 def cmd_start(msg):
     tg("sendMessage",
        chat_id=msg["chat"]["id"],
-       text="Привет! Это <b>«Скинулись»</b> 💸 — честный учёт общих трат.\n\n"
-            "Деньги переводятся напрямую между людьми, бот только честно считает:\n\n"
-            "🍕 хочешь собрать на общее дело — жми <b>＋ Создать сбор</b> ниже\n"
-            "     или пиши в чате: <code>/skor Пицца по 400 до пт</code>\n"
-            "✅ участники открывают ссылку, отмечаются «я в деле», потом «я скинулся»\n"
-            "💳 реквизиты переводов видны прямо в карточке\n"
-            "⏳ кто тянет до срока — бот аккуратно напомнит в личку\n\n"
-            "Ссылку на сбор можно переслать кому угодно — чат не обязателен.\n\n"
-            "Все твои сборы — кнопка ниже 👇",
+       text="Привет! 👋 Это <b>«Скинули»</b> 💸 — котёл для общих трат.\n\n"
+            "Пицца на всех, подарок другу, такси — собираете деньгами напрямую друг другу, "
+            "а бот просто честно ведёт список:\n\n"
+            "1️⃣ <b>Создай сбор</b> — название, сколько с каждого, дедлайн\n"
+            "2️⃣ <b>Кинешь ссылку друзьям</b> — они откроют и скажут: «в деле» или «не участвую»\n"
+            "3️⃣ Каждый скинулся — жмёт кнопку, и <b>все видят, кто сколько скинул</b> ✅\n"
+            "4️⃣ Собрали всё — бот объявит итог 🎉\n\n"
+            "Всё в мини-аппе: не надо писать никому в личку, суммы и статусы — на одном экране.\n\n"
+            "Жми кнопку 👇",
        parse_mode="HTML",
-       reply_markup={"inline_keyboard": [[
-           {"text": "🗂 Мои сборы", "url": deep_link("home")},
-           {"text": "＋ Создать сбор", "url": deep_link("new")},
-       ]]},
+        reply_markup={"inline_keyboard": [
+            [{"text": "＋ Создать сбор 💸", "url": deep_link("new")}],
+            [{"text": "🗂 Мои сборы", "url": deep_link("home")}],
+        ]},
        disable_web_page_preview=True)
 
 

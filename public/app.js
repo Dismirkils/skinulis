@@ -278,7 +278,7 @@ function renderForm() {
       '<label class="fl">Как считаем</label>' +
       '<div class="chips" id="fModeChips">' + chips + '</div>' +
       sumHtml +
-      '<label class="fl">Дедлайн (не обязательно)</label>' +
+      '<label class="fl">Дедлайн по твоему времени (не обязательно)</label>' +
       '<div class="dl-row">' +
         '<input type="date" id="fDate" value="' + esc(dy || '') + '">' +
         '<input type="time" id="fTime" value="' + esc(dt || '') + '">' +
@@ -321,11 +321,11 @@ function renderCollection(c) {
   const unpaid = c.roster.filter(r => !r.paid && !r.declined).length;
   const declinedN = c.roster.filter(r => r.declined).length;
 
-  /* цель */
+  /* цель + дедлайн — одной картой */
   let target;
   if (c.mode === 'per_person') {
     target = '<div class="big">' + money(c.per_person, c.currency) + '</div>' +
-             '<div class="sub">с каждого· скинулись ' + c.paid_count + ' · ждём ' + unpaid + '</div>';
+             '<div class="sub">с каждого · скинулись ' + c.paid_count + ' · ждём ' + unpaid + '</div>';
   } else if (c.mode === 'total') {
     const pct = c.goal_total ? Math.min(100, Math.round(c.total / c.goal_total * 100)) : 0;
     target = '<div class="big">' + money(c.total, c.currency) +
@@ -334,8 +334,11 @@ function renderCollection(c) {
              '<div class="bar"><i style="width:' + pct + '%"></i></div>';
   } else {
     target = '<div class="big">' + money(c.total, c.currency) + '</div>' +
-             '<div class="sub">кто сколько хочет · скинулись ' + c.paid_count + ' · ждём ' + unpaid + '</div>';
+             '<div class="sub">кто сколько хотел · скинулись ' + c.paid_count + ' · ждём ' + unpaid + '</div>';
   }
+  const dlLine = c.deadline_left
+    ? '<div class="sub" style="margin-top:8px">⏳ <b>' + esc(c.deadline_left) + '</b></div>'
+    : '';
 
   /* мой блок — зависит от того, участвуют ли */
   const st = meStateOf(c);
@@ -359,13 +362,13 @@ function renderCollection(c) {
       '<button class="mini-btn ghost" id="declineMe">🚫 Не участвую</button></div></div>';
   } else if (c.status === 'active') {
     mine = '<div class="card">' +
-      '<div class="mystatus"><span class="emoji">💸</span>' +
-      '<div><div class="big" style="font-size:22px">' +
-        (c.mode === 'per_person' ? money(c.per_person, c.currency) : 'сколько не жалко') + '</div>' +
-      '<div class="sub">' + (c.mode === 'per_person'
-        ? 'С тебя столько. Жми «Я скинулся» внизу экрана'
-        : 'Введи сумму и жми «Я скинулся» внизу экрана') + '</div></div></div>' +
-      (c.mode !== 'per_person' ? '<input class="free-input" id="amount" inputmode="numeric" placeholder="300">' : '') +
+      (c.mode === 'per_person'
+        ? '<div class="mystatus"><span class="emoji">💸</span>' +
+          '<div><div class="sub">С тебя ' + money(c.per_person, c.currency) +
+          ' — жми «Я скинулся» внизу экрана 👇</div></div></div>'
+        : '<div class="mystatus"><span class="emoji">🎲</span>' +
+          '<div><div class="sub">Введи свою сумму и жми «Я скинулся» внизу экрана 👇</div></div></div>' +
+          '<input class="free-input" id="amount" inputmode="numeric" placeholder="300">') +
       '<div class="org-actions single"><button class="mini-btn ghost" id="declineMe">🚫 Не участвую</button></div>' +
       '</div>';
   } else {
@@ -384,13 +387,14 @@ function renderCollection(c) {
   const canKick = c.is_organizer && c.status === 'active';
   const rows = c.roster.map(r => {
     const nm = r.me ? 'Ты' : esc(r.name || '???');
+    const usr = (!r.me && r.username) ? ' <span class="usr">@' + esc(r.username) + '</span>' : '';
     const amt = r.paid && r.amount != null ? '<span class="amt">' + esc(r.amount) + ' ' + esc(c.currency) + '</span>' : '';
     const mark = r.declined ? '🚫' : (r.paid ? '✅' : '⭕');
     const kick = (canKick && !r.me && !r.paid)
       ? '<button class="delsmall kick" data-kick="' + esc(r.id) + '" title="Убрать из сбора" style="margin-top:10px">✕</button>' : '';
     return '<li' + (r.declined ? ' class="declined"' : '') + '>' +
       '<span class="st">' + mark + '</span>' +
-      '<span class="nm' + (r.me ? ' me' : '') + '">' + nm + '</span>' + amt + kick + '</li>';
+      '<span class="nm' + (r.me ? ' me' : '') + '">' + nm + usr + '</span>' + amt + kick + '</li>';
   }).join('');
   const roster = '<div class="card"><h2>Участники</h2>' +
     '<div class="roster-legend">✅ скинулся · ⭕ в деле · 🚫 отказался</div>' +
@@ -420,8 +424,7 @@ function renderCollection(c) {
       '<button class="back' + (S.home.length ? ' on' : '') + '" id="backBtn">‹</button>' +
       '<h1>' + esc(c.title) + '</h1>' + chipOf(c) +
     '</div>' +
-    '<div class="card">' + target + '</div>' +
-    (c.deadline_left ? '<div class="card" style="text-align:center">⏳ <b>' + esc(c.deadline_left) + '</b></div>' : '') +
+    '<div class="card">' + target + dlLine + '</div>' +
     mine + hint + roster + org + delRow +
     '<div class="foot">Скинулись 💸 · честный учёт, видно кто и сколько скинул</div>';
 }
@@ -514,7 +517,15 @@ async function submitForm() {
   }
   const dy = $('#fDate') && $('#fDate').value ? $('#fDate').value : '';
   const dt = $('#fTime') && $('#fTime').value ? $('#fTime').value : '';
-  const deadline = dy && dt ? dy + ' ' + dt : '';
+  /* отдаём время как ввёл юзер + его пояс (±HHMM) — иначе сервер путает ЧП/UTC и дедлайн уезжает */
+  let deadline = '';
+  if (dy && dt) {
+    const off = -new Date().getTimezoneOffset();
+    const sign = off >= 0 ? '+' : '-';
+    const oh = String(Math.floor(Math.abs(off) / 60)).padStart(2, '0');
+    const om = String(Math.abs(off) % 60).padStart(2, '0');
+    deadline = dy + ' ' + dt + ' ' + sign + oh + om;
+  }
   const hint = $('#fHint') ? $('#fHint').value.trim() : '';
   const data = { title: title, per_person: per, goal_total: goal, deadline: deadline, pay_hint: hint };
   data.codes = (f.mode === 'create' && Array.isArray(S.formPool))
