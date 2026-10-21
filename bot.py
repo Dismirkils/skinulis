@@ -432,6 +432,7 @@ def build_view(cid, me_code):
         "pay_hint": c["pay_hint"],
         "status": c["status"],
         "is_organizer": me_code == c["created_by"],
+        "created_by": c["created_by"],
         "organizer": {"name": user_of(c["created_by"])["name"], "username": user_of(c["created_by"])["username"]},
         "paid_count": len(paid),
         "unpaid_count": len(unpaid_codes(cid)),
@@ -562,6 +563,10 @@ def tick_collection(cid):
                     % c["title"])
             return
         if t <= 0 and t > -86400:
+            # организатору — разово: время вышло, сколько людей не отметилось
+            nag(cid, c["created_by"], "timeup",
+                "⏰ Время по «%s» вышло. Не скинулись: %d. Дай им шанс до финального подсчёта "
+                "или продли дедлайн (/edit)" % (c["title"], len(unpaid_codes(cid))))
             for code in debtors:
                 nag(cid, code, "t0",
                     "🏁 Дедлайн по «%s» прошёл. Если ещё не скинулся — жми «Я скинулся» до финального подсчёта 💀"
@@ -574,7 +579,7 @@ def tick_collection(cid):
         nag(cid, c["created_by"], "stale", "👋 Сбор «%s» висит 2 недельки. Если он уже не нужен — закрой: /close" % c["title"])
 
 
-def close_collection(cid, by, auto=False):
+def close_collection(cid, by=None, auto=False):
     with LOCK:
         c = get_collection(cid)
         if not c or c["status"] != "active":
@@ -596,8 +601,35 @@ def close_collection(cid, by, auto=False):
         if names_missed:
             text += "\n💀 Слились: " + html.escape(", ".join(names_missed))
         tg("sendMessage", chat_id=chat, text=text, parse_mode="HTML", disable_web_page_preview=True)
+    elif not chat and BOT_TOKEN:
+        # сбор без чата (создан в аппе) — усилиям его участников пусть приходит личный итог
+        head = "🏁 <b>«%s» — итог</b>\nСобрано %s от %d %s" % (
+            html.escape(c["title"]), money(total, c["currency"]), len(paid),
+            "человека" if len(paid) in (2, 3, 4) and len(paid) % 10 in (2, 3, 4) else "человек")
+        if names_missed:
+            head += "\nНе отметились: " + html.escape(", ".join(names_missed))
+        for m in set(paid.keys()) | {c["created_by"]}:
+            tg("sendMessage", chat_id=int(m), text=head, parse_mode="HTML",
+               disable_web_page_preview=True)
     update_card(cid)
     return True
+
+
+def finalize(cid):
+    """Все, кто не отказался, скинулись (или план набран) → сбор сам закрывается."""
+    with LOCK:
+        c = get_collection(cid)
+        if not c or c["status"] != "active":
+            return
+        if not payments_of(cid):
+            return
+        waiting = unpaid_codes(cid)
+        if waiting:
+            goal_ok = c["mode"] == "total" and c["goal_total"] \
+                and total_collected(cid) >= c["goal_total"]
+            if not goal_ok:
+                return
+    close_collection(cid, auto=True)
 
 
 # ────────────────────────────────────────────────── команды бота
@@ -784,10 +816,9 @@ def handle_update(upd):
         # мини-аппа работает в своём окне — лично боту писать не нужно
         if msg["chat"]["type"] == "private":
             tg("sendMessage", chat_id=msg["chat"]["id"],
-               text="Я не отвечаю на сообщения 🙂 Я бота-счётчик — вся работа внутри мини-аппы.",
+               text="Я не отвечаю на сообщения 🙂 Вся работа — внутри мини-аппы.",
                reply_markup={"inline_keyboard": [[
-                   {"text": "🗂 Мои сборы", "url": deep_link("home")},
-                   {"text": "＋ Создать сбор", "url": deep_link("new")},
+                   {"text": "＋ Создать сбор 💸", "url": deep_link("new")},
                ]]},
                disable_web_page_preview=True)
         return
@@ -974,6 +1005,43 @@ class Handler(BaseHTTPRequestHandler):
                 payments_of(cid)[code] = {"amount": amount, "paid_ts": time.time()}
                 save_state()
             update_card(cid)
+            finalize(cid)
+            return self.send_json({"view": build_view(cid, code)})
+
+        if action == "unpay":
+            if c["status"] != "active":
+                return self.send_json({"error": "Сбор закрыт"}, 409)
+            with LOCK:
+                p = payments_of(cid)
+                had = p.pop(code, None)
+                if had:
+                    save_state()
+            update_card(cid)
+            return self.send_json({"view": build_view(cid, code)})
+
+        if action == "remove":
+            if code != c["created_by"]:
+                return self.send_json({"error": "только организатор"}, 403)
+            if c["status"] != "active":
+                return self.send_json({"error": "Сбор закрыт"}, 409)
+            target = str(body.get("code") or "")
+            if not target or target == code:
+                return self.send_json({"error": "Себя remove — закры сбор 👌"}, 400)
+            if target in payments_of(cid):
+                return self.send_json({"error": "Уже скинулся — галочку убирать не буду"}, 409)
+            with LOCK:
+                cut = False
+                if target in c["joined"]:
+                    c["joined"].remove(target)
+                    cut = True
+                dec = c.get("declined") or []
+                if target in dec:
+                    dec.remove(target)
+                    save_state()
+                if cut:
+                    save_state()
+            update_card(cid)
+            finalize(cid)
             return self.send_json({"view": build_view(cid, code)})
 
         if action == "hint":
@@ -988,11 +1056,7 @@ class Handler(BaseHTTPRequestHandler):
         if action == "close":
             if code != c["created_by"]:
                 return self.send_json({"error": "только организатор"}, 403)
-            with LOCK:
-                c["status"] = "closed"
-                c["closed_ts"] = time.time()
-                save_state()
-            update_card(cid)
+            close_collection(cid, by=code)
             return self.send_json({"view": build_view(cid, code)})
 
         if action == "edit":
@@ -1049,12 +1113,15 @@ class Handler(BaseHTTPRequestHandler):
         if action == "decline":
             if c["status"] != "active":
                 return self.send_json({"error": "Сбор закрыт"}, 409)
+            if code in payments_of(cid):
+                return self.send_json({"error": "Ты уже скинулся — сначала убери галочку ↩️"}, 409)
             with LOCK:
                 dec = c.setdefault("declined", [])
                 if code not in dec:
                     dec.append(code)
                     save_state()
             update_card(cid)
+            finalize(cid)
             return self.send_json({"view": build_view(cid, code)})
 
         if action == "add":

@@ -12,7 +12,6 @@ const S = {
   tab: 'home',       // home | collection | form
   coll: null,        // текущий сбор (view с сервера или демо)
   home: [],          // «мои сборы»
-  addPool: undefined,// список, кого можно добавить (для организатора)
   formPool: undefined,// кого можно позвать при создании сбора
   form: null,        // {mode:'create'|'edit', chip, data}
   introDone: localStorage.getItem('skinulis_intro_v2') === '1',
@@ -175,7 +174,7 @@ function navColl(id) {
 
 async function openReal(id) {
   VIEW.innerHTML = '<div class="hero"><div class="e">⏳</div></div>';
-  S.addPool = undefined;
+  S.formPool = undefined;
   try {
     S.coll = await api('/api/c/' + id);
     S.tab = 'collection';
@@ -345,37 +344,28 @@ function renderCollection(c) {
     mine = '<div class="card">' +
       '<div class="mystatus"><span class="emoji">✅</span>' +
       '<div><div class="big" style="font-size:22px">' + money(c.my_amount, c.currency) + '</div>' +
-      '<div class="sub">Ты скинулся. Красавчик 💪</div></div></div></div>';
+      '<div class="sub">Ты скинулся. Красавчик 💪</div></div></div>' +
+      '<div class="org-actions single"><button class="mini-btn ghost" id="unpayMe">↩️ Убрать галочку</button></div>' +
+      '</div>';
   } else if (st === 'declined') {
     mine = '<div class="card"><div class="mystatus"><span class="emoji">🚫</span>' +
       '<div><div class="big" style="font-size:20px">Ты не участвуешь</div>' +
-      '<div class="sub">Если передумал — кнопка ниже. Никто не осудит 🙂</div></div></div>' +
+      '<div class="sub">Список и статусы смотреть можно. Если передумал — кнопка ниже. Никто не осудит 🙂</div></div></div>' +
       '<div class="org-actions single"><button class="mini-btn ghost" id="joinMe">↩️ Вернуться в сбор</button></div></div>';
   } else if (st === 'none' && c.status === 'active') {
-    const primary = c.mode === 'per_person'
-      ? '<div class="org-actions"><button class="mini-btn go" id="payInline">💸 Я скинулся' +
-        (c.per_person ? ' ' + esc(c.per_person) + ' ' + esc(c.currency) : '') + '</button></div>' +
-        '<div class="org-actions">' +
-          '<button class="mini-btn ghost" id="joinMe">⭕ В деле, скину позже</button>' +
-          '<button class="mini-btn ghost" id="declineMe">🚫 Не мой расклад</button>' +
-        '</div>'
-      : '<div class="org-actions"><button class="mini-btn go" id="joinMe">⭕ В деле</button>' +
-        '<button class="mini-btn ghost" id="declineMe">🚫 Не участвую</button></div>';
     mine = '<div class="card"><h2>Ты участвуешь?</h2>' +
-      '<div class="sub">Статус каждого виден всем: ✅ скинулся · ⭕ в деле · 🚫 отказался</div>' +
-      primary + '</div>';
+      '<div class="sub">Нажми «В деле» — попадёшь в список. Скинешься потом, кнопка будет внизу экрана</div>' +
+      '<div class="org-actions"><button class="mini-btn go" id="joinMe">⭕ В деле</button>' +
+      '<button class="mini-btn ghost" id="declineMe">🚫 Не участвую</button></div></div>';
   } else if (c.status === 'active') {
     mine = '<div class="card">' +
       '<div class="mystatus"><span class="emoji">💸</span>' +
       '<div><div class="big" style="font-size:22px">' +
         (c.mode === 'per_person' ? money(c.per_person, c.currency) : 'сколько не жалко') + '</div>' +
       '<div class="sub">' + (c.mode === 'per_person'
-        ? 'С тебя столько. Отметишься — и галочка ✅ появится в списке'
-        : 'Введи сумму и подтверди') + '</div></div></div>' +
+        ? 'С тебя столько. Жми «Я скинулся» внизу экрана'
+        : 'Введи сумму и жми «Я скинулся» внизу экрана') + '</div></div></div>' +
       (c.mode !== 'per_person' ? '<input class="free-input" id="amount" inputmode="numeric" placeholder="300">' : '') +
-      '<div class="org-actions single"><button class="mini-btn go" id="payInline">💸 Я скинулся' +
-        (c.mode === 'per_person' && c.per_person ? ' ' + esc(c.per_person) + ' ' + esc(c.currency) : '') + '</button></div>' +
-      '<div class="sub" style="margin-top:4px">В Telegram эта кнопка дублируется внизу экрана</div>' +
       '<div class="org-actions single"><button class="mini-btn ghost" id="declineMe">🚫 Не участвую</button></div>' +
       '</div>';
   } else {
@@ -391,13 +381,16 @@ function renderCollection(c) {
     : '';
 
   /* участники: ✅ скинулся · ⭕ в деле · 🚫 отказался */
+  const canKick = c.is_organizer && c.status === 'active';
   const rows = c.roster.map(r => {
     const nm = r.me ? 'Ты' : esc(r.name || '???');
     const amt = r.paid && r.amount != null ? '<span class="amt">' + esc(r.amount) + ' ' + esc(c.currency) + '</span>' : '';
     const mark = r.declined ? '🚫' : (r.paid ? '✅' : '⭕');
+    const kick = (canKick && !r.me && !r.paid)
+      ? '<button class="delsmall kick" data-kick="' + esc(r.id) + '" title="Убрать из сбора" style="margin-top:10px">✕</button>' : '';
     return '<li' + (r.declined ? ' class="declined"' : '') + '>' +
       '<span class="st">' + mark + '</span>' +
-      '<span class="nm' + (r.me ? ' me' : '') + '">' + nm + '</span>' + amt + '</li>';
+      '<span class="nm' + (r.me ? ' me' : '') + '">' + nm + '</span>' + amt + kick + '</li>';
   }).join('');
   const roster = '<div class="card"><h2>Участники</h2>' +
     '<div class="roster-legend">✅ скинулся · ⭕ в деле · 🚫 отказался</div>' +
@@ -408,29 +401,14 @@ function renderCollection(c) {
   /* организаторская панель */
   let org = '';
   if (c.is_organizer && c.status === 'active') {
-    let usersPool = '';
-    if (S.addPool === 'loading') {
-      usersPool = '<div class="sub">смотрю, кто тут зарегистрирован…</div>';
-    } else if (S.addPool === 'empty') {
-      usersPool = '<div class="sub">Ещё никто не отметился в боте — пусть откроют ссылку 📤</div>';
-    } else if (Array.isArray(S.addPool) && S.addPool.length) {
-      usersPool = '<div class="addpool">' +
-        S.addPool.map(u =>
-          '<label class="urow"><input type="checkbox" data-user="' + esc(u.code) + '">' +
-          '<span>' + esc(u.name) + (u.username ? ' <i>@' + esc(u.username) + '</i>' : '') + '</span></label>'
-        ).join('') +
-        '<div class="org-actions single"><button class="mini-btn go" id="addGo" disabled>Добавить выбранных</button></div>' +
-        '</div>';
-    }
     org = '<div class="card org-panel"><h2>Организатору</h2>' +
       '<input id="hintInput" placeholder="Куда скидывать: СБП, карта…" value="' + esc(c.pay_hint) + '">' +
       '<div class="org-actions">' +
         '<button class="mini-btn ghost" id="saveHint">Сохранить реквизиты</button>' +
         '<button class="mini-btn danger" id="closeColl">Завершить сбор</button>' +
       '</div>' +
-      '<div class="org-actions single"><button class="mini-btn ghost" id="addUsersBtn">➕ Добавить участников</button></div>' +
-      usersPool +
       '<div class="org-actions single"><button class="mini-btn ghost" id="editColl">✏️ Изменить название, сумму, дедлайн</button></div>' +
+      '<div class="sub">✕ возле имени — убрать человека из сбора. Приглашать удобно ссылкой 📤</div>' +
       '</div>';
   }
   const delRow = c.is_organizer
@@ -655,29 +633,12 @@ document.addEventListener('click', async (ev) => {
   if (ev.target.id === 'joinMe' && S.coll) return membershipToggle('join');
   if (ev.target.id === 'declineMe' && S.coll) return membershipToggle('decline');
 
-  /* — организатор: пул известных людей для добавления — */
-  if (ev.target.id === 'addUsersBtn' && S.coll) {
-    if (S.addPool && S.addPool.length) { S.addPool = undefined; haptic(); return render(); }
-    S.addPool = 'loading'; render();
-    try {
-      const r = await api('/api/users/' + S.coll.id);
-      S.addPool = (r.items || []).length ? r.items : 'empty';
-    } catch (e) { S.addPool = undefined; toast(e.message); }
-    return render();
-  }
-  if (ev.target.id === 'addGo' && S.coll) {
-    const codes = [...VIEW.querySelectorAll('.addpool input[type=checkbox]:checked')].map(i => i.dataset.user);
-    if (!codes.length) return;
-    try {
-      const r = await api('/api/c/' + S.coll.id + '/add', {
-        method: 'POST', body: JSON.stringify({ codes }), headers: authHeaders(),
-      });
-      S.coll = r.view; S.addPool = undefined;
-      haptic(); beepOk(); toast('Добавлено: ' + r.added + ' 👥');
-      render();
-    } catch (e) { toast(e.message); }
-    return;
-  }
+  /* — отменить «я скинулся» — */
+  if (ev.target.id === 'unpayMe' && S.coll) return unpay();
+
+  /* — организатор убирает человека из сбора — */
+  const kickB = ev.target.closest('[data-kick]');
+  if (kickB && S.coll) return kickMember(kickB.dataset.kick);
 
   /* — форма (создать / изменить) — */
   const chipBtn = ev.target.closest('#fModeChips [data-chip]');
@@ -710,14 +671,18 @@ document.addEventListener('click', async (ev) => {
     return;
   }
 
-  /* поделиться */
+  /* поделиться — с живым текстом приглашения */
   const shareB = ev.target.closest('[data-share]');
   if (shareB) {
     const c = S.coll;
+    const msg = 'Вас пригласили в сбор «' + c.title + '» 💸 Загляни — и скажи, ты в деле или нет.';
     const url = 'https://t.me/share/url?url=' + encodeURIComponent('https://t.me/' + S.bot + '?startapp=' + c.id) +
-      '&text=' + encodeURIComponent('Скидываемся: ' + c.title + ' 💸');
+      '&text=' + encodeURIComponent(msg);
     if (tg) tg.openTelegramLink(url);
-    else { try { await navigator.clipboard.writeText(url); toast('Ссылка скопирована'); } catch (e) {} }
+    else {
+      const full = 'https://t.me/' + S.bot + '?startapp=' + c.id;
+      try { await navigator.clipboard.writeText(full); toast('Ссылка скопирована'); } catch (e) {}
+    }
   }
 });
 
@@ -726,15 +691,7 @@ if (tg) tg.BackButton.onClick(() => {
   navHome();
 });
 
-/* чекбоксы в пуле добавления: живым управляем кнопкой */
-document.addEventListener('change', (ev) => {
-  if (!ev.target.closest || !ev.target.closest('.addpool')) return;
-  const n = VIEW.querySelectorAll('.addpool input[type=checkbox]:checked').length;
-  const go = $('#addGo');
-  if (go) { go.disabled = !n; go.textContent = n ? 'Добавить (' + n + ')' : 'Добавить выбранных'; }
-});
-
-/* — участие: в деле / не участвую — */
+/* — участие: в дело / не участвую — */
 async function membershipToggle(action) {
   const c = S.coll;
   if (S.demo) {
@@ -761,9 +718,56 @@ async function membershipToggle(action) {
     });
     S.coll = r.view;
     haptic();
-    toast(action === 'join' ? 'Ты в деле ✅' : 'Не учавствуешь 🚫');
+    toast(action === 'join' ? 'Ты в деле ✅' : 'Не участвуешь 🚫');
     render();
     loadHome();
+  } catch (e) { toast(e.message); }
+}
+
+/* — отменить «я скинулся» — */
+async function unpay() {
+  const c = S.coll;
+  if (S.demo) {
+    const meRow = c.roster.find(r => r.me);
+    if (meRow) { meRow.paid = false; delete meRow.amount; }
+    c.my_paid = false; c.my_amount = null; c.me_state = 'waiting';
+    c.paid_count = c.roster.filter(r => r.paid).length;
+    c.unpaid_count = c.roster.filter(r => !r.paid && !r.declined).length;
+    c.total = c.roster.reduce((s, r) => s + (r.paid ? (r.amount || 0) : 0), 0);
+    haptic(); toast('Галочку убрал — снова ждём ⭕');
+    return render();
+  }
+  try {
+    const r = await api('/api/c/' + c.id + '/unpay', {
+      method: 'POST', body: '{}', headers: authHeaders(),
+    });
+    S.coll = r.view;
+    haptic(); toast('Галочку убрал — снова ждём ⭕');
+    render(); loadHome();
+  } catch (e) { toast(e.message); }
+}
+
+/* — организатор убирает человека из сбора — */
+async function kickMember(code) {
+  const c = S.coll;
+  const row = (c.roster || []).find(r => String(r.id) === String(code));
+  const nm = row ? (row.name || 'этого человека') : 'этого человека';
+  const ok = await askConfirm('Убрать ' + nm + ' из сбора?\nЧем меньше шум — тем лучше, придётся позвать ещё раз 📤');
+  if (!ok) return;
+  if (S.demo) {
+    c.roster = c.roster.filter(r => r.id !== code);
+    c.paid_count = c.roster.filter(r => r.paid).length;
+    c.unpaid_count = c.roster.filter(r => !r.paid && !r.declined).length;
+    haptic(); toast('Демо: убрано ✕');
+    return render();
+  }
+  try {
+    const r = await api('/api/c/' + c.id + '/remove', {
+      method: 'POST', body: JSON.stringify({ code }), headers: authHeaders(),
+    });
+    S.coll = r.view;
+    haptic(); toast('Убрал из сбора ✕');
+    render(); loadHome();
   } catch (e) { toast(e.message); }
 }
 
