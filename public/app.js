@@ -480,13 +480,21 @@ function renderCollection(c) {
       '<div class="sub">✕ возле имени — убрать человека из сбора. Приглашать удобно ссылкой 📤</div>' +
       '</div>';
   }
-  const delRow = c.is_organizer
-    ? '<div class="delrow"><button class="mini-btn danger" id="deleteColl">Удалить сбор</button></div>'
-    : '<div class="delrow"><button class="mini-btn ghost" id="deleteColl">🙈 Убрать из моих</button></div>';
+  let delRow = '';
+  if (c.is_organizer) {
+    delRow = '<div class="delrow"><button class="mini-btn danger" id="deleteColl">Удалить сбор</button></div>';
+  } else {
+    const meRow2 = (c.roster || []).find(r => r.me);
+    const btns = [];
+    if (c.status === 'active' && meRow2 && !meRow2.paid)
+      btns.push('<button class="mini-btn" id="leaveColl">🚪 Выйти из сбора</button>');
+    btns.push('<button class="mini-btn ghost" id="deleteColl">🙈 Убрать из моих</button>');
+    delRow = '<div class="delrow">' + btns.join(' ') + '</div>';
+  }
 
   VIEW.innerHTML =
     '<div class="top">' +
-      '<button class="back' + (S.home.length ? ' on' : '') + '" id="backBtn">‹</button>' +
+      '<button class="back on" id="backBtn">‹</button>' +
       '<h1>' + esc(c.title) + '</h1>' + chipOf(c) +
     '</div>' +
     '<div class="card">' + target + dlLine + '</div>' +
@@ -738,6 +746,24 @@ document.addEventListener('click', async (ev) => {
   /* — организатор: изменить — */
   if (ev.target.id === 'editColl' && S.coll) { haptic(); return openEdit(); }
 
+  /* — выход участника из чужого сбора — */
+  if (ev.target.id === 'leaveColl' && S.coll) {
+    const c0 = S.coll;
+    const ok = await askConfirm('Выйти из «' + c0.title + '»?\nТы пропадёшь из списка участников — у остальных сбор останется.');
+    if (!ok) return;
+    if (S.demo) {
+      S.coll = null; S.tab = 'home';
+      haptic(); toast('Демо: вышел 🚪'); render(); return;
+    }
+    try {
+      await api('/api/c/' + c0.id + '/leave', { method: 'POST', body: '{}', headers: authHeaders() });
+      haptic(); beepOk(); toast('Вышел из сбора 🚪 (у других он остался)');
+      S.coll = null; S.tab = 'home';
+      await loadHome(); render();
+    } catch (e) { toast(e.message); }
+    return;
+  }
+
   /* — удаление внутри сбора — */
   if (ev.target.id === 'deleteColl' && S.coll) {
     const c0 = S.coll;
@@ -773,17 +799,17 @@ document.addEventListener('click', async (ev) => {
     return;
   }
 
-  /* поделиться — с живым текстом приглашения */
+  /* поделиться — с живым текстом приглашения (startapp: сразу мини-аппа на этом сборе) */
   const shareB = ev.target.closest('[data-share]');
   if (shareB) {
     const c = S.coll;
-    const msg = 'Вас пригласили в сбор «' + c.title + '» 💸 Загляни — и скажи, ты в деле или нет.';
-    const url = 'https://t.me/share/url?url=' + encodeURIComponent('https://t.me/' + S.bot + '?start=' + c.id) +
+    const msg = 'Вас пригласили в сбор «' + c.title + '» 💸 Откроется сразу в приложении — скажи, ты в деле или нет.';
+    const inviteUrl = 'https://t.me/' + S.bot + '?startapp=' + c.id;
+    const url = 'https://t.me/share/url?url=' + encodeURIComponent(inviteUrl) +
       '&text=' + encodeURIComponent(msg);
     if (tg && tg.openTelegramLink) tg.openTelegramLink(url);
     else {
-      const full = 'https://t.me/' + S.bot + '?start=' + c.id;
-      try { await navigator.clipboard.writeText(full); toast('Ссылка скопирована'); } catch (e) {}
+      try { await navigator.clipboard.writeText(inviteUrl); toast('Ссылка скопирована'); } catch (e) {}
     }
   }
 });

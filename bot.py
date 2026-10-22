@@ -1796,6 +1796,31 @@ class Handler(BaseHTTPRequestHandler):
                 save_state()
             return self.send_json({"hidden": True, "id": cid})
 
+        if action == "leave":
+            # участник выходит: пропадает из списка участников, сбор остаётся у остальных
+            if c["status"] != "active":
+                return self.send_json({"error": "Сбор закрыт"}, 409)
+            if code == c["created_by"]:
+                return self.send_json({"error": "Ты организатор — сбор можно завершить или удалить"}, 400)
+            with LOCK:
+                payments_of(cid)
+                if code in payments_of(cid):
+                    return self.send_json({"error": "Ты скинулся — сначала «Передумал» 🔄"}, 409)
+                changed = False
+                if code in c["joined"]:
+                    c["joined"].remove(code)
+                    changed = True
+                dec = c.get("declined") or []
+                if code in dec:
+                    dec.remove(code)
+                    changed = True
+                if not changed:
+                    return self.send_json({"error": "Тебя и так нет в этом сборе"}, 400)
+                save_state()
+            update_card(cid)
+            finalize(cid)
+            return self.send_json({"left": True, "view": build_view(cid, code)})
+
         return self.send_json({"error": "не знаю такое"}, 404)
 
     def do_GET(self):
