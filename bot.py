@@ -144,72 +144,99 @@ def share_url(cid):
 
 # ────────────────────────────────────────────────── initData (HMAC)
 
+def _dbg_initdata(lines):
+    """Диагностика initData в файл /app/data/debug_initdata.log — читается cat'ом из панели.
+    Хвост файла держим коротким (последние ~40 строк), чтобы он не рос бесконечно."""
+    try:
+        p = os.path.join(DATA_DIR, "debug_initdata.log")
+        old = ""
+        if os.path.exists(p):
+            with open(p, encoding="utf-8", errors="replace") as f:
+                old = f.read()
+        keep = old.splitlines()[-38:]
+        stamp = time.strftime("%d.%m %H:%M:%S")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("\n".join(keep) + "\n" + "\n".join("[%s] %s" % (stamp, x) for x in lines) + "\n")
+    except Exception:
+        pass
+
+
 def validate_init_data(init_data, reason=None):
-    """Подпись Telegram. data_check_string считаем по «сырым» парам (как их отдал ТГ);
-    на всякий случай пробуем и декодированный вариант — старые клиенты энкодили иначе.
-    reason — словарь для диагностики (для логов, пусть всегда будет заполнен)."""
+    """Подпись Telegram. Клиенты и версии API считают data_check_string по-разному
+    (включают/исключают signature, сырые/декодированные значения) — пробуем ВСЕ
+    варианты, и какой сошёлся, тот и правда. Диагностика — в data/debug_initdata.log."""
     if not init_data:
         if reason is not None:
             reason["r"] = "пусто"
         return None
 
-    def fail(rs, pairs=None, got=None, calc=None):
-        if reason is not None:
-            reason["r"] = rs
-            if pairs:
-                reason["keys"] = ",".join(sorted(k for k, _ in pairs))[:200]
-            if got is not None:
-                reason["got"] = got[:16]
-            if calc is not None:
-                reason["calc"] = calc[:16]
-        return None
+    secret = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
 
-    def check(pairs, user_pairs):
+    raw_pairs = [tuple(x.split("=", 1)) for x in init_data.split("&") if "=" in x]
+    try:
+        dec_pairs = urllib.parse.parse_qsl(init_data, keep_blank_values=True)
+    except Exception:
+        dec_pairs = []
+    forms = []
+    for plabel, pairs in (("raw", raw_pairs), ("dec", dec_pairs)):
+        if not pairs:
+            continue
+        for excl_sig in (True, False):
+            forms.append((plabel + ("-искл" if excl_sig else "-вкл"), pairs, excl_sig))
+
+    dbg = []
+    result = None
+    ok_form = None
+    for name, pairs, excl_sig in forms:
         d = {}
         hash_ = None
         for k, v in pairs:
             if k == "hash":
                 hash_ = v
                 continue
-            if k == "signature":
-                # Telegram Bot API 7+: подпись Ed25519 ГЛОБАЛЬНАЯ — её НЕ включают в data_check_string.
-                # Без этого у реальных клиентов (initData содержит signature=...) HMAC не совпадал
-                # и ВСЕ попадали в демо-режим.
+            if k == "signature" and excl_sig:
                 continue
             d[k] = v
         if not hash_:
-            return fail("нет hash", pairs)
+            dbg.append("%s: нет hash" % name)
+            continue
         dcs = "\n".join("%s=%s" % (k, v) for k, v in sorted(d.items()))
-        secret = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
         calc = hmac.new(secret, dcs.encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(calc, hash_):
-            return fail("HMAC не совпал", pairs, hash_, calc)
-        auth_date = int(d.get("auth_date", "0") or 0)
-        if auth_date and time.time() - auth_date > 86400 * 3:
-            return fail("протух auth_date", pairs)
-        uj = dict(user_pairs).get("user") or ""
-        for candidate in (urllib.parse.unquote(uj), uj):  # user — url-encoded JSON
-            try:
-                u = json.loads(candidate)
-                if isinstance(u, dict):
-                    return u
-            except Exception:
+        if hmac.compare_digest(calc, hash_):
+            auth_date = int(d.get("auth_date", "0") or 0)
+            if auth_date and time.time() - auth_date > 86400 * 3:
+                dbg.append("%s: ХОРОШАЯ подпись, но протух auth_date" % name)
                 continue
-        return fail("user не распарсился", pairs)
+            uj = d.get("user", "")
+            for cand in (uj, urllib.parse.unquote(uj)):  # user — url-encoded JSON (или уже декодированный)
+                try:
+                    u = json.loads(cand)
+                    if isinstance(u, dict) and u.get("id"):
+                        result = u
+                        ok_form = name
+                        break
+                except Exception:
+                    continue
+            if result:
+                dbg.append("%s: ПОДПИСЬ ОК, user=%s" % (name, (result.get("first_name") or "?")))
+                break
+            dbg.append("%s: подпись ОК, но user не распарсился (%s)" % (name, uj[:60]))
+        else:
+            dbg.append("%s: HMAC нет got=%s calc=%s" % (name, hash_[:16], calc[:16]))
 
-    # 1) сырые пары, как их прислал Telegram
-    raw_pairs = [tuple(x.split("=", 1)) for x in init_data.split("&") if "=" in x]
-    res = check(raw_pairs, raw_pairs)
-    # 2) запасной путь: декодированные значения (старый вариант проверки)
-    if not res:
-        try:
-            dec_pairs = urllib.parse.parse_qsl(init_data, keep_blank_values=True)
-            res = check(dec_pairs, dec_pairs)
-        except Exception as e:
-            if reason is not None:
-                reason["r"] = "декод-эм" + str(e)[:40]
-            return None
-    return res if isinstance(res, dict) else None
+    # сырой dcs для оффлайн-анализа, если ни один вариант не сошёлся
+    if not result and raw_pairs:
+        dcs_all = "\n".join("%s=%s" % (k, v) for k, v in sorted(raw_pairs) if k not in ("hash",))
+        dbg.append("dcs(искл hash): " + dcs_all[:900])
+
+    if reason is not None:
+        reason["r"] = ("ОК " + ok_form) if result else "; ".join(dbg)[:1500]
+        reason["keys"] = ",".join(sorted(k for k, _ in raw_pairs))[:200]
+    if result:
+        _dbg_initdata(["ПОДХОД: форма=%s user=%s" % (ok_form, result.get("id"))])
+    else:
+        _dbg_initdata(["ОТКАЗ: %s" % "; ".join(dbg)])
+    return result if isinstance(result, dict) else None
 
 
 # ────────────────────────────────────────────────── разбор /skor
@@ -1417,8 +1444,8 @@ class Handler(BaseHTTPRequestHandler):
                     save_state()
                 return u
             if not DEV_MODE:
-                log.warning("initData отклонён: причина=%s длиной=%d ключи=%s got=%s calc=%s",
-                            rd.get("r"), len(hdr), rd.get("keys"), rd.get("got"), rd.get("calc"))
+                log.warning("initData отклонён: заголовок=%dб причина=%s (полная диагностика: cat data/debug_initdata.log)",
+                            len(hdr), str(rd.get("r"))[:600])
         if DEV_MODE:
             with LOCK:
                 return {"id": 900000, "first_name": "Ты (демо)", "username": "tester"}
