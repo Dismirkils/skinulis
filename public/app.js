@@ -1,7 +1,56 @@
 /* «Скинулись» — фронт бота. Ванила JS, один файл. */
 'use strict';
 
-const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+/* Мост Telegram. Официальный telegram-web-app.js грузится с CDN и у слабых
+   операторов может не загрузиться вовсе — тогда аппа молча становилась демкой.
+   Фолбэк: если мостов нет, но при запуске клиент передал tgWebAppData в URL —
+   собираем лёгкий шим сами (это тот же initData, что пришёл от Telegram). */
+function buildTelegramShim() {
+  const hash = new URLSearchParams((location.hash || '').replace(/^[#/]*/, ''));
+  const query = new URLSearchParams(location.search);
+  const initData = hash.get('tgWebAppData') || query.get('tgWebAppData') || '';
+  if (!initData) return null;
+  const kv = {};
+  initData.split('&').forEach(p => {
+    const i = p.indexOf('=');
+    if (i > 0) kv[p.slice(0, i)] = p.slice(i + 1);
+  });
+  let user = {};
+  let theme = {};
+  try { user = JSON.parse(decodeURIComponent(kv.user || '{}')); } catch (e) {}
+  try { theme = JSON.parse(decodeURIComponent(hash.get('tgWebAppThemeParams') || '{}')); } catch (e) {}
+  const noopBtn = { onClick() {}, offClick() {}, show() {}, hide() {}, setText() {}, showProgress() {}, hideProgress() {} };
+  const shim = {
+    initData: initData,
+    initDataUnsafe: Object.assign({}, user, {
+      start_param: kv.start_param || hash.get('tgWebAppStartParam') || query.get('tgWebAppStartParam') || ''
+    }),
+    themeParams: theme,
+    version: hash.get('tgWebAppVersion') || 'shim',
+    platform: hash.get('tgWebAppPlatform') || 'unknown',
+    colorScheme: String(theme.bg_color || '').startsWith('#') && isDark(theme.bg_color) ? 'dark' : 'light',
+    isExpanded: true,
+    ready() {}, expand() {},
+    setHeaderColor() {}, setBackgroundColor() {},
+    BackButton: noopBtn,
+    MainButton: Object.assign({}, noopBtn),
+    HapticFeedback: { impactOccurred() {}, notificationOccurred() {}, selectionChanged() {} },
+    openTelegramLink() {}, openLink() {},
+    showConfirm(msg, cb) { if (cb) cb(window.confirm(msg)); },
+    showAlert(cb) { if (cb) cb(); },
+    readTextFromClipboard(cb) { if (cb) cb(''); },
+  };
+  return shim;
+}
+function isDark(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+  if (!m) return false;
+  const n = parseInt(m[1], 16);
+  return (n >> 16) * 0.3 + ((n >> 8 & 255)) * 0.6 + (n & 255) * 0.1 < 128;
+}
+const tgOfficial = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+const tgShim_ = buildTelegramShim();
+const tg = (tgOfficial && (tgOfficial.initData || !tgShim_)) ? tgOfficial : (tgShim_ || tgOfficial);
 const $ = (p) => document.querySelector(p);
 const VIEW = $('#view');
 
@@ -123,8 +172,9 @@ const DEMO = () => ({
         || new URLSearchParams(location.search).get('startapp')
         || 'home';
 
+      let lastErr = null;
       let inited = false;
-      for (let attempt = 0; attempt < 2; attempt++) {
+      for (let attempt = 0; attempt < 3; attempt++) {
         try {
           const r = await api('/api/init', {
             method: 'POST',
@@ -139,10 +189,11 @@ const DEMO = () => ({
           inited = true;
           break;
         } catch (e) {
-          // 401 (нет initData — открыто не в Telegram) сразу без ретрая
+          // 401 (нет initData — открыто не в Telegram или подписано не так) сразу без ретрая
+          lastErr = e;
           if (e && e.message === 'auth') break;
-          // сеть глюканула — одна мягкая попытка ещё раз
-          if (attempt === 0) nasleep(1200);
+          // сеть глюкнула — ждём и пробуем ещё (обрывы на LTE — обычное дело)
+          if (attempt < 2) await nasleep(600 + attempt * 900);
         }
       }
       if (!inited) {
@@ -151,8 +202,10 @@ const DEMO = () => ({
         S.user = d.demoUser; S.demo = true;
         $('#banner').hidden = false;
         $('#banner').textContent = hasAuth
-          ? '🚫 Telegram дал данные, но сервер не принял — попробуй открыть бота заново'
-          : '🧪 Демо-режим — это превью. Открывай бота из Telegram, чтобы работать по-настоящему.';
+          ? '🚫 Telegram дал данные, но сервер не принял — попробуй открыть бота заново' + (lastErr && lastErr.message && lastErr.message !== 'auth' ? ' (' + lastErr.message + ')' : '')
+          : (tg
+              ? '🧵 Telegram не передал данные доступа. Полностью закрой бота и открой заново.'
+              : '🧪 Демо-режим — это превью. Открывай бота из Telegram, чтобы работать по-настоящему.');
         if (startParam.startsWith('c_')) {
           S.tab = 'collection';
           S.coll = d.collections.find(c => c.id === startParam) || d.collections[0];

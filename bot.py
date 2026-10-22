@@ -144,10 +144,24 @@ def share_url(cid):
 
 # ────────────────────────────────────────────────── initData (HMAC)
 
-def validate_init_data(init_data):
+def validate_init_data(init_data, reason=None):
     """Подпись Telegram. data_check_string считаем по «сырым» парам (как их отдал ТГ);
-    на всякий случай пробуем и декодированный вариант — старые клиенты энкодили иначе."""
+    на всякий случай пробуем и декодированный вариант — старые клиенты энкодили иначе.
+    reason — словарь для диагностики (для логов, пусть всегда будет заполнен)."""
     if not init_data:
+        if reason is not None:
+            reason["r"] = "пусто"
+        return None
+
+    def fail(rs, pairs=None, got=None, calc=None):
+        if reason is not None:
+            reason["r"] = rs
+            if pairs:
+                reason["keys"] = ",".join(sorted(k for k, _ in pairs))[:200]
+            if got is not None:
+                reason["got"] = got[:16]
+            if calc is not None:
+                reason["calc"] = calc[:16]
         return None
 
     def check(pairs, user_pairs):
@@ -164,14 +178,15 @@ def validate_init_data(init_data):
                 continue
             d[k] = v
         if not hash_:
-            return None
+            return fail("нет hash", pairs)
         dcs = "\n".join("%s=%s" % (k, v) for k, v in sorted(d.items()))
         secret = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
-        if not hmac.compare_digest(hmac.new(secret, dcs.encode(), hashlib.sha256).hexdigest(), hash_):
-            return None
+        calc = hmac.new(secret, dcs.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(calc, hash_):
+            return fail("HMAC не совпал", pairs, hash_, calc)
         auth_date = int(d.get("auth_date", "0") or 0)
         if auth_date and time.time() - auth_date > 86400 * 3:
-            return None
+            return fail("протух auth_date", pairs)
         uj = dict(user_pairs).get("user") or ""
         for candidate in (urllib.parse.unquote(uj), uj):  # user — url-encoded JSON
             try:
@@ -180,7 +195,7 @@ def validate_init_data(init_data):
                     return u
             except Exception:
                 continue
-        return None
+        return fail("user не распарсился", pairs)
 
     # 1) сырые пары, как их прислал Telegram
     raw_pairs = [tuple(x.split("=", 1)) for x in init_data.split("&") if "=" in x]
@@ -190,7 +205,9 @@ def validate_init_data(init_data):
         try:
             dec_pairs = urllib.parse.parse_qsl(init_data, keep_blank_values=True)
             res = check(dec_pairs, dec_pairs)
-        except Exception:
+        except Exception as e:
+            if reason is not None:
+                reason["r"] = "декод-эм" + str(e)[:40]
             return None
     return res if isinstance(res, dict) else None
 
@@ -1391,13 +1408,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def authorize(self):
         hdr = self.headers.get("Authorization", "")
-        if hdr.startswith("tma "):
-            u = validate_init_data(hdr[4:])
+        if hdr.startswith("tma ") or hdr:
+            rd = {}
+            u = validate_init_data(hdr[4:] if hdr.startswith("tma ") else hdr, rd)
             if u:
                 with LOCK:
                     upsert_user(u)
                     save_state()
                 return u
+            if not DEV_MODE:
+                log.warning("initData отклонён: причина=%s длиной=%d ключи=%s got=%s calc=%s",
+                            rd.get("r"), len(hdr), rd.get("keys"), rd.get("got"), rd.get("calc"))
         if DEV_MODE:
             with LOCK:
                 return {"id": 900000, "first_name": "Ты (демо)", "username": "tester"}
