@@ -1074,6 +1074,16 @@ def handle_amount_text(msg, text):
         fa({"from": msg["from"], "chat": msg["chat"]}, "")
         return
     p = (STATE.get("pendings") or {}).get(user_code)
+    if p and p.get("del") and time.time() - p.get("ts", 0) < 7200:
+        STATE["pendings"].pop(user_code, None)
+        save_state()
+        nums = parse_nums(text)
+        if nums is None:
+            tg("sendMessage", chat_id=chat_id,
+               text="Напиши номера через запятую — например «1, 2» 🙂", disable_web_page_preview=True)
+            return
+        delete_pick(msg["chat"], user_code, deletables(msg["chat"], user_code), nums)
+        return
     if p and time.time() - p.get("ts", 0) < 7200:
         cid = p.get("cid")
         c = STATE["collections"].get(cid)
@@ -1161,18 +1171,32 @@ def cmd_close(msg, args):
     chat = msg["chat"]
     who = uid(msg["from"])
     cid = args.strip()
+    targets, bad = None, None
     with LOCK:
         if cid in STATE["collections"]:
-            target = cid
+            targets = [cid]
         else:
             mine = [c for c in STATE["collections"].values()
                     if c.get("chat_id") == chat["id"] and c["status"] == "active"
                     and c["created_by"] == who]
-            target = max(mine, key=lambda x: x["created_ts"])["id"] if mine else None
-    if not target:
-        tg("sendMessage", chat_id=chat["id"], text="Твоих активных сборов в этом чате нет.", disable_web_page_preview=True)
+            mine.sort(key=lambda x: x["created_ts"])
+            nums = parse_nums(cid)
+            if nums:
+                if max(nums) > len(mine):
+                    bad = len(mine)
+                else:
+                    targets = [mine[n - 1]["id"] for n in nums]
+            elif mine:
+                targets = [mine[-1]["id"]]
+    if targets is None or bad is not None:
+        if bad is not None:
+            tg("sendMessage", chat_id=chat["id"],
+               text="Тут номера от 1 до %d 🙂" % bad, disable_web_page_preview=True)
+        else:
+            tg("sendMessage", chat_id=chat["id"], text="Твоих активных сборов в этом чате нет.", disable_web_page_preview=True)
         return
-    close_collection(target, who)
+    for t in targets:
+        close_collection(t, who)
 
 
 def cmd_help(msg):
@@ -1190,13 +1214,13 @@ def cmd_create(msg):
 
 
 def deletables(chat, who):
-    """Сборы организатора для /delete: активные и закрытые (в личке — все)."""
+    """Сборы организатора для /delete: активные и закрытые (в личке — все). Порядок — как в /list и /edit."""
     private = chat["type"] == "private"
     with LOCK:
         mine = [c for c in STATE["collections"].values()
                 if c["created_by"] == str(who)
                 and (private or c.get("chat_id") == chat["id"])]
-        mine.sort(key=lambda c: c["created_ts"], reverse=True)
+        mine.sort(key=lambda c: c["created_ts"])
     return mine
 
 
@@ -1208,29 +1232,21 @@ def cmd_delete(msg, args):
         tg("sendMessage", chat_id=chat["id"],
            text="🗑 У тебя пока нет своих сборов. Создать: /skor Пицца по 400", disable_web_page_preview=True)
         return
-    n = parse_num(args)
-    if n is None:
-        lines = ["🗑 <b>Что снести?</b> Напиши номер: /delete 1, 2, 3…\n"]
+    nums = parse_nums(args)
+    if nums is None:
+        lines = ["🗑 <b>Что снести?</b> Номер или несколько: /delete 1, 2, 3…\n"]
         for i, c in enumerate(mine, 1):
             if c["status"] == "closed":
                 lines.append("%d) 🏁 %s (закрыт)" % (i, html.escape(c["title"])))
             else:
                 lines.append("%d) 💸 %s" % (i, html.escape(c["title"])))
+        # ждём ответ «1,2» текстом без префикса тоже
+        STATE.setdefault("pendings", {})[who] = {"del": True, "chat": chat["id"], "ts": time.time()}
+        save_state()
         tg("sendMessage", chat_id=chat["id"], text="\n".join(lines), parse_mode="HTML",
            disable_web_page_preview=True)
         return
-    if n < 1 or n > len(mine):
-        tg("sendMessage", chat_id=chat["id"],
-           text="Тут номера от 1 до %d 🙂" % len(mine), disable_web_page_preview=True)
-        return
-    c = mine[n - 1]
-    err = delete_collection(c["id"], by=who)
-    if err:
-        tg("sendMessage", chat_id=chat["id"], text="Не вышло: " + err, disable_web_page_preview=True)
-        return
-    tg("sendMessage", chat_id=chat["id"],
-       text="🗑 «%s» удалён." % html.escape(c["title"]), parse_mode="HTML",
-       disable_web_page_preview=True)
+    delete_pick(chat, who, mine, nums)
 
 
 def cmd_edit(msg, args):
@@ -1280,6 +1296,40 @@ def parse_num(s):
         return max(1, int(s.strip()))
     except (ValueError, AttributeError):
         return None
+
+
+def parse_nums(s, cap=20):
+    """«1,2» / «1 2» / «1 и 2» -> [1, 2]; без цифр -> None. До cap номеров."""
+    nums = [int(x) for x in re.findall(r"\d+", s or "")]
+    if not nums:
+        return None
+    nums = sorted(set(n for n in nums if n >= 1))[:cap]
+    return nums or None
+
+
+def delete_pick(chat, who, mine, nums):
+    """Удалить выбранные номера (список mine — снапшот; индексы 1-based)."""
+    if max(nums) > len(mine):
+        tg("sendMessage", chat_id=chat["id"],
+           text="Тут номера от 1 до %d 🙂" % len(mine), disable_web_page_preview=True)
+        return
+    done, errs = [], []
+    for n in nums:
+        c = mine[n - 1]
+        err = delete_collection(c["id"], by=who)
+        if err:
+            errs.append("«%s»: %s" % (html.escape(c["title"]), err))
+        else:
+            done.append(html.escape(c["title"]))
+    lines = []
+    if len(done) == 1:
+        lines.append("🗑 «%s» удалён." % done[0])
+    elif done:
+        lines.append("🗑 Удалено %d: %s." % (len(done), ", ".join("«%s»" % t for t in done)))
+    if errs:
+        lines.append("Не вышло: " + "; ".join(errs))
+    tg("sendMessage", chat_id=chat["id"], text="\n".join(lines), parse_mode="HTML",
+       disable_web_page_preview=True)
 
 
 def handle_update(upd):
@@ -1382,8 +1432,8 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         fname = os.path.normpath(rel)
-        full = os.path.join(PUBLIC_DIR, fname)
-        if not full.startswith(PUBLIC_DIR) or not os.path.isfile(full):
+        full = os.path.normpath(os.path.join(PUBLIC_DIR, fname))
+        if not full.startswith(PUBLIC_DIR + os.sep) or not os.path.isfile(full):
             self.send_json({"error": "not found"}, 404)
             return
         ext = os.path.splitext(full)[1].lower()
