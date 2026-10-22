@@ -404,7 +404,7 @@ def card_html(cid):
         fmt_hint_line(c),
     ]
     if c["status"] == "active":
-        parts.append("✏️ Свой сбор так же: <code>/skor Пицца по 400 до 25.10</code>")
+        parts.append("✏️ Свой сбор создаётся так же: <code>/skor Пицца по 400 до 25.10</code>")
     parts.append("Организатор: " + html.escape(org["name"]))
     return "\n".join([p for p in parts if p])
 
@@ -587,6 +587,10 @@ def handle_callback(upd):
             tg("answerCallbackQuery", callback_query_id=cq["id"],
                text="Напиши боту: /skor Пицца по 400 до 25.10 — «по 400» с каждого, «на 5000» общая сумма, «до дата» дедлайн",
                show_alert=True)
+        elif cid == "how":
+            if chat_id:
+                send_how_manual(chat_id)
+            tg("answerCallbackQuery", callback_query_id=cq["id"])
         else:
             tg("answerCallbackQuery", callback_query_id=cq["id"])
         return
@@ -943,30 +947,120 @@ def cmd_start(msg, payload=""):
         return
     tg("sendMessage",
        chat_id=msg["chat"]["id"],
-       text="Привет! 👋 Это <b>«Скинулись»</b> 💸 — котёл для общих трат.\n\n"
-            "Пицца на всех, подарок другу, такси — собираете деньгами напрямую друг другу, "
-            "а бот просто честно ведёт список:\n\n"
-            "1️⃣ <b>Создай сбор</b> — названием, суммой и дедлайном\n"
-            "2️⃣ <b>Кинешь ссылку друзьям</b> — они жмут кнопки прямо в чате\n"
-            "3️⃣ Каждый скинулся — жмёт «Я скинулся», и <b>все видят, кто сколько скинул</b> ✅\n"
-            "4️⃣ Собрали всё — бот объявит итог 🎉\n\n"
-            "Всё работает и в боте, и прямо в чате — каждый выберет, что удобнее.\n\n"
-            "Жми кнопку 👇",
+       text="Привет! 👋 Это <b>«Скинулись»</b> 💸 — честный учёт общих трат.\n\n"
+            "Деньги вы скидываете друг другу сами, бот только ведёт список:\n\n"
+            "1️⃣ Создай сбор — <code>/skor Пицца по 400</code> или в боте\n"
+            "2️⃣ Зови друзей — они заходят и жмут кнопки прямо в чате ✅\n"
+            "3️⃣ Как все скинулись — бот объявит итог 🎉\n\n"
+            "Ссылка-приглашение приносит другу карточку сбора прямо в его чат с ботом.\n\n"
+            "🧭 Ориентиры: команды — через «/» в меню ввода, кнопки быстрого доступа — внизу 👇",
        parse_mode="HTML",
         reply_markup={"inline_keyboard": [
-            [{"text": "＋ Создать сбор 💸", "url": deep_link("new")}],
+            [{"text": "📱 Открыть в боте", "url": deep_link("home")}],
             [
-                {"text": "🗂 Мои сборы", "url": deep_link("home")},
-                {"text": "/skor — пример", "callback_data": "hint:skor"},
+                {"text": "/skor — пример 💸", "callback_data": "hint:skor"},
+                {"text": "❓ Как пользоваться", "callback_data": "hint:how"},
             ],
         ]},
        disable_web_page_preview=True)
+    # постоянные кнопки внизу: бот и главные команды
+    tg("sendMessage", chat_id=msg["chat"]["id"],
+       text="🧭 Кнопки всегда внизу 👇 — ботовский экран или всё по командам в чате.",
+       reply_markup=reply_keyboard(),
+       disable_web_page_preview=True)
+
+
+def chat_my_items(code):
+    """Активные сборы юзера (везде), для кнопки «🗂 Мои сборы»."""
+    out = []
+    for c in STATE["collections"].values():
+        if c["status"] != "active":
+            continue
+        if code == c["created_by"] or code in (c.get("joined") or []):
+            out.append(c)
+    out.sort(key=lambda x: x["created_ts"], reverse=True)
+    return out
+
+
+def send_create_manual(chat_id):
+    tg("sendMessage", chat_id=chat_id,
+       text="💸 <b>Создать сбор</b>\n\n"
+            "1️⃣ В чате — напиши команду прямо сюда:\n"
+            "<code>/skor Пицца по 400 до 25.10</code>\n"
+            "   · <b>по 400</b> — с каждого\n"
+            "   · <b>на 5000</b> — общая копилка\n"
+            "   · <b>кто сколько хочет</b> — суммы у каждого свои\n"
+            "   · <b>до 25.10</b> или <b>до 25.10 20:00</b> — дедлайн\n\n"
+            "2️⃣ В боте — экран с полями: жми «📱 Открыть в боте» внизу 👇\n\n"
+            "Карточка появится в чате сразу — зови друзей кнопкой «🔗 Позвать друзей».",
+       reply_markup={"inline_keyboard": [[
+           {"text": "📱 Создать в боте", "url": deep_link("new")},
+       ]]},
+       parse_mode="HTML", disable_web_page_preview=True)
+
+
+def send_my_manual(chat_id, me_code):
+    items = chat_my_items(me_code)
+    if not items:
+        tg("sendMessage", chat_id=chat_id,
+           text="🗂 Активных сборов у тебя нет.\n\n"
+                "Создай: <code>/skor Пицца по 400</code> — или кнопкой «📱 Открыть в боте» 👇",
+           parse_mode="HTML", disable_web_page_preview=True)
+        return
+    expl = "🗂 <b>Твои активные сборы</b> — выложил карточки ниже, жми кнопки на них:"
+    for c in items[:5]:
+        dl, _ = deadline_left(c["deadline"])
+        unpaid = len(unpaid_codes(c["id"]))
+        expl += ("\n\n💸 <b>%s</b> · скинулись %d · ждём %d%s"
+                 % (html.escape(c["title"]), len(payments_of(c["id"])), unpaid,
+                    (" · " + dl.strip()) if dl.strip() else ""))
+        # карточку в чат юзера — сразу с кнопками
+        post_card(c["id"], chat_id)
+    if len(items) > 5:
+        expl += "\n\n… и ещё %d — /list показывает сборы чата" % (len(items) - 5)
+    tg("sendMessage", chat_id=chat_id, text=expl,
+       parse_mode="HTML", disable_web_page_preview=True)
+
+
+def send_how_manual(chat_id):
+    tg("sendMessage", chat_id=chat_id,
+       text="❓ <b>Как пользоваться «Скинулись»</b>\n\n"
+            "Деньги вы переводите друг другу сами — бот просто честно ведёт счёт 👀\n\n"
+            "💬 <b>Вариант 1 — прямо в чате (проще всего)</b>\n"
+            "1. Создай: <code>/skor Пицца по 400</code>\n"
+            "2. В чате появится карточка с кнопками:\n"
+            "   ✅ Я скинулся · 🙅 Не участвую · 🔁 Передумал · 🔗 Позвать друзей\n"
+            "3. «🔗 Позвать друзей» — кинь ссылку, друзья зайдут и жмут те же кнопки\n"
+            "4. Если «на 5000» или «кто сколько хочет» — после ✅ напиши мне сумму числом, например «350»\n"
+            "5. Как все скинулись (или набралась сумма) — бот объявит итог 🎉\n\n"
+            "📱 <b>Вариант 2 — в боте (экран с полями)</b>\n"
+            "Кнопка «📱 Открыть в боте» внизу 👇 — то же самое, но с большим экраном: "
+            "списки, реквизиты и итоги там заметнее.\n\n"
+            "⌨️ <b>Команды:</b>\n"
+            "<code>/skor Название по 400</code> — создать\n"
+            "<code>/list</code> — сборы этого чата\n"
+            "<code>/close</code> — закрыть свой сбор\n"
+            "<code>/delete код</code> — удалить\n\n"
+            "Остались вопросы — это сообщение всегда рядом: <code>/help</code>",
+       reply_markup=reply_keyboard(),
+       parse_mode="HTML", disable_web_page_preview=True)
 
 
 def handle_amount_text(msg, text):
-    """Юзер написал боту без команды: или сумму (если мы её ждали), или подсказку."""
+    """Юзер написал боту без команды: кнопки внизу, сумма (если мы её ждали) или подсказка."""
     user_code = uid(msg["from"])
     chat_id = msg["chat"]["id"]
+    t = text.strip()
+    # кнопки reply-клавиатуры
+    if t == "💸 Создать сбор":
+        send_create_manual(chat_id)
+        return
+    if t == "🗂 Мои сборы":
+        send_my_manual(chat_id, user_code)
+        return
+    if t == "❓ Как пользоваться":
+        send_how_manual(chat_id)
+        return
     p = (STATE.get("pendings") or {}).get(user_code)
     if p and time.time() - p.get("ts", 0) < 7200:
         cid = p.get("cid")
@@ -1070,23 +1164,7 @@ def cmd_close(msg, args):
 
 
 def cmd_help(msg):
-    tg("sendMessage", chat_id=msg["chat"]["id"],
-       text="💸 <b>Команды</b>\n\n"
-            "<code>/skor Пицца по 400 до 25.10</code> — создать сбор в этом чате\n"
-            "   <b>по 400</b> — с каждого; <b>на 5000</b> — общая сумма\n"
-            "   <b>до 25.10</b>/<b>25.10 20:00</b> — дедлайн\n\n"
-            "У каждой карточки — кнопки: <b>✅ Я скинулся</b>, <b>🙅 Не участвую</b>, "
-            "<b>🔁 Передумал</b> и <b>🔗 Позвать друзей</b>. Всё работает прямо в чате — "
-            "аппа не обязательна, но удобнее всего там 📱\n\n"
-            "Со сборов «на 5000» и «кто сколько хочет»: после «✅ Я скинулся» напиши мне сумму "
-            "просто числом, например «350» — отмечу галочку.\n\n"
-            "/list — сборы в этом чате\n"
-            "/close — закрыть свой последний сбор\n"
-            "/create — создать сбор в боте (без привязки к чату)\n"
-            "/delete — удалить свой сбор (на выбор)\n"
-            "/edit — поменять название, сумму или дедлайн\n\n"
-            "Что-то пошло не так? Пиши организатору напрямую 🙂",
-       parse_mode="HTML", disable_web_page_preview=True)
+    send_how_manual(msg["chat"]["id"])
 
 
 def cmd_create(msg):
@@ -1621,7 +1699,8 @@ def polling_loop():
     offset = 0
     log.info("Бот запущен: @%s", bot_username)
     while True:
-        r = tg("getUpdates", offset=offset, timeout=25, allowed_updates=["message"])
+        r = tg("getUpdates", offset=offset, timeout=25,
+               allowed_updates=["message", "callback_query"])
         if r is None:
             time.sleep(3)
             continue
@@ -1634,17 +1713,28 @@ def polling_loop():
 
 
 BOT_COMMANDS = [
-    ("skor",   "Создать сбор в этом чате"),
+    ("skor",   "Создать сбор: /skor Пицца по 400"),
     ("list",   "Сборы этого чата"),
     ("close",  "Закрыть свой последний сбор"),
-    ("create", "Создать сбор в боте"),
     ("delete", "Удалить свой сбор"),
     ("edit",   "Изменить название, сумму, дедлайн"),
+    ("help",   "Как пользоваться ботом"),
 ]
 
 
 WEBAPP_URL = os.environ.get(
     "WEBAPP_URL", "https://bot-1792527651-5464-faslor.bothost.tech/app")
+
+
+def reply_keyboard():
+    """Постоянные кнопки внизу: выбор между ботом (аппой) и командами."""
+    return {"keyboard": [
+        [{"text": "📱 Открыть в боте", "web_app": {"url": WEBAPP_URL}}],
+        [{"text": "💸 Создать сбор"},
+         {"text": "🗂 Мои сборы"}],
+        [{"text": "❓ Как пользоваться"}],
+    ], "resize_keyboard": True, "is_persistent": True,
+        "input_field_placeholder": "Сумма — числом, например «350»"}
 
 
 def register_commands():
@@ -1676,7 +1766,7 @@ def main():
 
     httpd = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     httpd.daemon_threads = True
-    log.info("Мини-аппа: http://localhost:%d/app  (DEV_MODE=%s)", PORT, DEV_MODE)
+    log.info("Бот: http://localhost:%d/app  (DEV_MODE=%s)", PORT, DEV_MODE)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
