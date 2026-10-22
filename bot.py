@@ -51,6 +51,9 @@ STATE = {
     "nags": {},         # "c_ab12:777:t24" -> ts
 }
 LOCK = threading.RLock()
+# "chat_id:message_id" -> последний отправленный текст карточки (чтобы не гонять
+# холостые editMessageText, упирающиеся в 400 «message is not modified»)
+CARD_CACHE = {}
 bot_username = os.environ.get("BOT_USERNAME", "")  # заполнится из getMe
 
 
@@ -497,12 +500,18 @@ def update_card(cid):
             cards[str(c["chat_id"])] = None
     for chat_id, mid in list(cards.items()):
         text = card_html(cid)
+        key = "%s:%s" % (chat_id, mid)
         if mid:
+            # Telegram оозвращает 400 «not modified», если править тем же текстом —
+            # кешируем последний отправленный текст и пропускаем холостые правки
+            if CARD_CACHE.get(key) == text:
+                continue
             try:
                 ok = tg("editMessageText", chat_id=int(chat_id), message_id=mid,
                         text=text, parse_mode="HTML",
                         reply_markup=card_keyboard(cid), disable_web_page_preview=True)
                 if ok:
+                    CARD_CACHE[key] = text
                     continue
             except Exception:
                 pass
@@ -511,6 +520,7 @@ def update_card(cid):
                   disable_web_page_preview=True)
         if sent:
             cards[chat_id] = sent["message_id"]
+            CARD_CACHE["%s:%s" % (chat_id, sent["message_id"])] = text
             save_state()
         elif chat_id != str(c.get("chat_id")):
             cards.pop(chat_id, None)
@@ -525,9 +535,14 @@ def post_card(cid, chat_id):
     if str(chat_id) in cards and cards[str(chat_id)]:
         try:
             old = int(cards[str(chat_id)])
+            text = card_html(cid)
+            key = "%s:%s" % (chat_id, old)
+            if CARD_CACHE.get(key) == text:
+                return True
             tg("editMessageText", chat_id=int(chat_id), message_id=old,
-               text=card_html(cid), parse_mode="HTML",
+               text=text, parse_mode="HTML",
                reply_markup=card_keyboard(cid), disable_web_page_preview=True)
+            CARD_CACHE[key] = text
             return True
         except Exception:
             pass
@@ -536,6 +551,7 @@ def post_card(cid, chat_id):
               disable_web_page_preview=True)
     if sent:
         cards[str(chat_id)] = sent["message_id"]
+        CARD_CACHE["%s:%s" % (chat_id, sent["message_id"])] = card_html(cid)
         save_state()
     return True
 
