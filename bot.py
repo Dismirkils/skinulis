@@ -953,7 +953,8 @@ def cmd_start(msg, payload=""):
             "2️⃣ Зови друзей — они заходят и жмут кнопки прямо в чате ✅\n"
             "3️⃣ Как все скинулись — бот объявит итог 🎉\n\n"
             "Ссылка-приглашение приносит другу карточку сбора прямо в его чат с ботом.\n\n"
-            "🧭 Ориентиры: команды — через «/» в меню ввода, кнопки быстрого доступа — внизу 👇",
+            "🧭 Ориентиры: все команды — кнопкой «Меню» слева в поле ввода, "
+            "быстрые кнопки — панелью внизу 👇",
        parse_mode="HTML",
         reply_markup={"inline_keyboard": [
             [{"text": "📱 Открыть в боте", "url": deep_link("home")}],
@@ -1036,7 +1037,7 @@ def send_how_manual(chat_id):
             "📱 <b>Вариант 2 — в боте (экран с полями)</b>\n"
             "Кнопка «📱 Открыть в боте» внизу 👇 — то же самое, но с большим экраном: "
             "списки, реквизиты и итоги там заметнее.\n\n"
-            "⌨️ <b>Команды:</b>\n"
+            "⌨️ <b>Команды</b> (список всегда под кнопкой «Меню» слева внизу):\n"
             "<code>/skor Название по 400</code> — создать\n"
             "<code>/list</code> — сборы этого чата\n"
             "<code>/close</code> — закрыть свой сбор\n"
@@ -1052,14 +1053,20 @@ def handle_amount_text(msg, text):
     chat_id = msg["chat"]["id"]
     t = text.strip()
     # кнопки reply-клавиатуры
-    if t == "💸 Создать сбор":
+    act = REPLY_ACTIONS.get(t)
+    if act == "create":
         send_create_manual(chat_id)
         return
-    if t == "🗂 Мои сборы":
+    if act == "my":
         send_my_manual(chat_id, user_code)
         return
-    if t == "❓ Как пользоваться":
+    if act == "how":
         send_how_manual(chat_id)
+        return
+    if act in ("close", "edit", "delete"):
+        # те же команды: /close, /edit, /delete — берут последний активный сбор
+        fa = {"close": cmd_close, "edit": cmd_edit, "delete": cmd_delete}[act]
+        fa({"from": msg["from"], "chat": msg["chat"]}, "")
         return
     p = (STATE.get("pendings") or {}).get(user_code)
     if p and time.time() - p.get("ts", 0) < 7200:
@@ -1187,7 +1194,7 @@ def cmd_delete(msg, args):
         return
     n = parse_num(args)
     if n is None:
-        lines = ["🗑 <b>Что снести?</b> Пиши номер: <code>/delete 2</code>\n"]
+        lines = ["🗑 <b>Что снести?</b> Напиши номер: /delete 1, 2, 3…\n"]
         lines += ["%d) 💸 %s" % (i, html.escape(c["title"])) for i, c in enumerate(mine, 1)]
         tg("sendMessage", chat_id=chat["id"], text="\n".join(lines), parse_mode="HTML",
            disable_web_page_preview=True)
@@ -1727,28 +1734,40 @@ WEBAPP_URL = os.environ.get(
 
 
 def reply_keyboard():
-    """Постоянные кнопки внизу: выбор между ботом (аппой) и командами."""
+    """Постоянные кнопки внизу: бот (аппа) + все команды как кнопки."""
     return {"keyboard": [
         [{"text": "📱 Открыть в боте", "web_app": {"url": WEBAPP_URL}}],
         [{"text": "💸 Создать сбор"},
          {"text": "🗂 Мои сборы"}],
-        [{"text": "❓ Как пользоваться"}],
+        [{"text": "🔒 Закрыть сбор"},
+         {"text": "✏️ Изменить сбор"}],
+        [{"text": "🗑 Удалить сбор"},
+         {"text": "❓ Как пользоваться"}],
     ], "resize_keyboard": True, "is_persistent": True,
         "input_field_placeholder": "Сумма — числом, например «350»"}
+
+
+REPLY_ACTIONS = {
+    "💸 Создать сбор": "create",
+    "🗂 Мои сборы": "my",
+    "🔒 Закрыть сбор": "close",
+    "✏️ Изменить сбор": "edit",
+    "🗑 Удалить сбор": "delete",
+    "❓ Как пользоваться": "how",
+}
 
 
 def register_commands():
     if BOT_TOKEN:
         tg("setMyCommands", commands=[{"command": c, "description": d} for c, d in BOT_COMMANDS])
         log.info("Меню команд обновлено: %s", ", ".join("/" + c for c, _ in BOT_COMMANDS))
-        # без этого кнопка меню не открывает нашу приложение бота и ссылки ?startapp= у
-        # чужих людей кидают их просто в чат с ботом
-        ok = tg("setChatMenuButton",
-                menu_button={"type": "web_app", "text": "💸 Скинулись", "web_app": {"url": WEBAPP_URL}})
+        # стандартная кнопка-меню слева в поле ввода: открывает полный список всех команд.
+        # (web_app-чип раньше заменял её — юзер просил убрать)
+        ok = tg("setChatMenuButton", menu_button={"type": "default"})
         if ok:
-            log.info("Кнопка меню бота открыта на приложение бота: %s", WEBAPP_URL)
+            log.info("Кнопка меню — стандартная (список команд в чате)")
         else:
-            log.warning("setChatMenuButton не сработал — ссылки ?startapp= могут не открывать аппу")
+            log.warning("setChatMenuButton не сработал")
 
 
 def main():
