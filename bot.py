@@ -982,17 +982,19 @@ def cmd_start(msg, payload=""):
         # показываем карточку сбора прямо в личном чате, аппа не нужна
         cid = payload
         c = STATE["collections"][cid]
+        if c["status"] != "active":
+            # закрытый сбор: deep-link открывает аппу с итогами; дублировать «Сбор
+            # закрыт» в личку нельзя — у юзера карточка и так уже перед глазами
+            return
         cards = c.setdefault("cards", {})
         if str(msg["chat"]["id"]) not in cards:
             cards[str(msg["chat"]["id"])] = None
-        tag = "👋 Привет! Тебя позвали в сбор \u2014 отвечай прямо здесь, кнопками ниже" \
-              if c["status"] == "active" else "🏁 Сбор уже закрылся \u2014 вот его итоги:"
+        tag = "👋 Привет! Тебя позвали в сбор \u2014 отвечай прямо здесь, кнопками ниже"
         tg("sendMessage", chat_id=msg["chat"]["id"], text=tag, disable_web_page_preview=True)
         update_card(cid)
-        if c["status"] == "active":
-            tg("sendMessage", chat_id=msg["chat"]["id"],
-               text="💡 Если аппа вдруг не открывается \u2014 всё то же самое можно делать здесь, кнопками на карточке.",
-               disable_web_page_preview=True)
+        tg("sendMessage", chat_id=msg["chat"]["id"],
+           text="💡 Если аппа вдруг не открывается \u2014 всё то же самое можно делать здесь, кнопками на карточке.",
+           disable_web_page_preview=True)
         return
     tg("sendMessage",
        chat_id=msg["chat"]["id"],
@@ -1006,7 +1008,7 @@ def cmd_start(msg, payload=""):
             "быстрые кнопки — панелью внизу 👇",
        parse_mode="HTML",
         reply_markup={"inline_keyboard": [
-            [{"text": "📱 Открыть в боте", "url": deep_link("home")}],
+            [{"text": "📱 Открыть в боте"}],
             [
                 {"text": "/skor — пример 💸", "callback_data": "hint:skor"},
                 {"text": "❓ Как пользоваться", "callback_data": "hint:how"},
@@ -1103,6 +1105,18 @@ def handle_amount_text(msg, text):
     t = text.strip()
     # кнопки reply-клавиатуры
     act = REPLY_ACTIONS.get(t)
+    if act == "app":
+        # «Открыть в боте»: iOS reply-web_app кнопки открываются без initData
+        # (падение в демо), а url-кнопки в reply-клавиатуре не поддерживаются
+        # и отправляются как текст — поэтому шлём inline deep-link: он открывает
+        # аппу с initData на всех платформах.
+        tg("sendMessage", chat_id=chat_id,
+           text="Открою приложение — жми 👇",
+           reply_markup={"inline_keyboard": [[
+               {"text": "📱 Открыть приложение 💸", "url": deep_link("home")},
+           ]]},
+           disable_web_page_preview=True)
+        return
     if act == "create":
         send_create_manual(chat_id)
         return
@@ -1853,11 +1867,11 @@ WEBAPP_URL = os.environ.get(
 
 def reply_keyboard():
     """Постоянные кнопки внизу: бот (аппа) + все команды как кнопки.
-    «Открыть в боте» — deep-link (t.me/bot?startapp=home), а не web_app-кнопка:
-    iOS открывает reply-web_app БЕЗ initData (проверено на юзере 23.10) — аппа
-    падала в демо-режим. Deep-link открывает то же самое с initData — надёжно."""
+    «📱 Открыть в боте» — простая ТЕКСТОВАЯ кнопка: web_app-вариант iOS открывает
+    без initData (демо), а url-вариант в reply-клавиатуре не существует и уходит
+    текстом в чат. Оба случая обработаны в handle_amount_text (act == 'app')."""
     return {"keyboard": [
-        [{"text": "📱 Открыть в боте", "url": deep_link("home")}],
+        [{"text": "📱 Открыть в боте"}],
         [{"text": "💸 Создать сбор"},
          {"text": "🗂 Мои сборы"}],
         [{"text": "🔒 Закрыть сбор"},
@@ -1869,6 +1883,7 @@ def reply_keyboard():
 
 
 REPLY_ACTIONS = {
+    "📱 Открыть в боте": "app",
     "💸 Создать сбор": "create",
     "🗂 Мои сборы": "my",
     "🔒 Закрыть сбор": "close",
