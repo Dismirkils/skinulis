@@ -680,11 +680,11 @@ document.addEventListener('click', async (ev) => {
   if (shareB) {
     const c = S.coll;
     const msg = 'Вас пригласили в сбор «' + c.title + '» 💸 Загляни — и скажи, ты в деле или нет.';
-    const url = 'https://t.me/share/url?url=' + encodeURIComponent('https://t.me/' + S.bot + '?startapp=' + c.id) +
+    const url = 'https://t.me/share/url?url=' + encodeURIComponent('https://t.me/' + S.bot + '?start=' + c.id) +
       '&text=' + encodeURIComponent(msg);
     if (tg && tg.openTelegramLink) tg.openTelegramLink(url);
     else {
-      const full = 'https://t.me/' + S.bot + '?startapp=' + c.id;
+      const full = 'https://t.me/' + S.bot + '?start=' + c.id;
       try { await navigator.clipboard.writeText(full); toast('Ссылка скопирована'); } catch (e) {}
     }
   }

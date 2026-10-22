@@ -130,6 +130,18 @@ def deep_link(start):
     return "https://t.me/%s?startapp=%s" % (u, start)
 
 
+def chat_link(start):
+    """Ссылка на бот в чате (работает даже там, где аппа не открывается)."""
+    u = bot_username or "skinulis_bot"
+    return "https://t.me/%s?start=%s" % (u, start)
+
+
+def share_url(cid):
+    msg = "Вас пригласили в сбор «%s» 💸 Жми — и скажи, ты в деле или нет." % STATE["collections"][cid]["title"]
+    return ("https://t.me/share/url?url=" + urllib.parse.quote(chat_link(cid), safe="") +
+            "&text=" + urllib.parse.quote(msg, safe=""))
+
+
 # ────────────────────────────────────────────────── initData (HMAC)
 
 def validate_init_data(init_data):
@@ -297,6 +309,7 @@ def create_collection(title, chat_id, created_by, per=None, goal=None, until=Non
         "closed_ts": None,
         "joined": [str(created_by)],
         "declined": [],
+        "cards": {},  # chat_id -> message_id с карточкой (может быть в нескольких чатах)
     }
     STATE["collections"][c["id"]] = c
     payments_of(c["id"])
@@ -404,30 +417,227 @@ def fmt_hint_line(c):
 
 def card_keyboard(cid):
     c = STATE["collections"][cid]
-    label = "💸 Скинуться" if c["status"] == "active" else "🗂 Посмотреть итоги"
-    return {"inline_keyboard": [[{"text": label, "url": deep_link(cid)}]]}
+    if c["status"] != "active":
+        return {"inline_keyboard": [
+            [{"text": "🏁 Итоги в боте", "url": deep_link(cid)}],
+            [{"text": "➕ Создать новый сбор", "url": deep_link("new")}],
+        ]}
+    kb = [
+        [
+            {"text": "✅ Я скинулся", "callback_data": "p:" + cid},
+            {"text": "🙅 Не участвую", "callback_data": "d:" + cid},
+        ],
+        [
+            {"text": "🔁 Передумал", "callback_data": "j:" + cid},
+            {"text": "🔗 Позвать друзей", "url": share_url(cid)},
+        ],
+    ]
+    return {"inline_keyboard": kb}
 
 
 def update_card(cid):
-    """Обновить карточку в чате (или создать, если нет)."""
+    """Обновить карточку во всех чатах, где она показана (или создать в основном)."""
     c = STATE["collections"].get(cid)
-    if not c or not c["chat_id"] or not BOT_TOKEN:
+    if not c or not BOT_TOKEN:
         return
-    if c["message_id"]:
+    cards = c.setdefault("cards", {})
+    if not cards and c.get("chat_id"):
+        if c.get("message_id"):
+            cards[str(c["chat_id"])] = c["message_id"]
+        else:
+            cards[str(c["chat_id"])] = None
+    for chat_id, mid in list(cards.items()):
+        text = card_html(cid)
+        if mid:
+            try:
+                ok = tg("editMessageText", chat_id=int(chat_id), message_id=mid,
+                        text=text, parse_mode="HTML",
+                        reply_markup=card_keyboard(cid), disable_web_page_preview=True)
+                if ok:
+                    continue
+            except Exception:
+                pass
+        sent = tg("sendMessage", chat_id=int(chat_id), text=text,
+                  parse_mode="HTML", reply_markup=card_keyboard(cid),
+                  disable_web_page_preview=True)
+        if sent:
+            cards[chat_id] = sent["message_id"]
+            save_state()
+        elif chat_id != str(c.get("chat_id")):
+            cards.pop(chat_id, None)
+
+
+def post_card(cid, chat_id):
+    """Выложить карточку сбора в конкретный чат (когда юзер пришёл по /start <код>)."""
+    c = STATE["collections"].get(cid)
+    if not c:
+        return False
+    cards = c.setdefault("cards", {})
+    if str(chat_id) in cards and cards[str(chat_id)]:
         try:
-            ok = tg("editMessageText", chat_id=c["chat_id"], message_id=c["message_id"],
-                    text=card_html(cid), parse_mode="HTML",
-                    reply_markup=card_keyboard(cid), disable_web_page_preview=True)
-            if ok:
-                return
+            old = int(cards[str(chat_id)])
+            tg("editMessageText", chat_id=int(chat_id), message_id=old,
+               text=card_html(cid), parse_mode="HTML",
+               reply_markup=card_keyboard(cid), disable_web_page_preview=True)
+            return True
         except Exception:
             pass
-    sent = tg("sendMessage", chat_id=c["chat_id"], text=card_html(cid),
+    sent = tg("sendMessage", chat_id=int(chat_id), text=card_html(cid),
               parse_mode="HTML", reply_markup=card_keyboard(cid),
               disable_web_page_preview=True)
     if sent:
-        c["message_id"] = sent["message_id"]
+        cards[str(chat_id)] = sent["message_id"]
         save_state()
+    return True
+
+
+# ────────────────────────────────────────── кнопки в чате (callback_query)
+
+def chat_paid(cid, user, amount=None):
+    """«Я скинулся» из чата. Возвращает (короткое подтверждение, ошибка|None)."""
+    c = STATE["collections"].get(cid)
+    if not c:
+        return None, "Сбор не найден"
+    with LOCK:
+        c = STATE["collections"].get(cid)
+        if not c:
+            return None, "Сбор не найден"
+        if c["status"] != "active":
+            return None, "Сбор уже закрыт"
+        code = str(user["id"])
+        paid = payments_of(cid)
+        if code in paid:
+            if c["mode"] == "per_person":
+                # toggle: у «по N с каждого» нажатие второй раз снимает галочку
+                paid.pop(code, None)
+                save_state()
+                return "Галочку снял 🔄", None
+            # total/free: уже скинулся — это досыпание, ждём сумму текстом
+            STATE.setdefault("pendings", {})[code] = {"cid": cid, "ts": time.time()}
+            save_state()
+            return "png-amount", None
+        if amount is None and c["mode"] == "per_person" and c["per_person"]:
+            amount = c["per_person"]
+        if amount is None:
+            STATE.setdefault("pendings", {})[code] = {"cid": cid, "ts": time.time()}
+            save_state()
+            return "png-amount", None  # спросим сумму текстом
+        try:
+            amount = int(amount)
+        except (TypeError, ValueError):
+            return None, "Странная сумма"
+        if amount <= 0 or amount > 10_000_000:
+            return None, "Странная сумма"
+        if code not in c["joined"]:
+            c["joined"].append(code)
+        payments_of(cid)[code] = {"amount": amount, "paid_ts": time.time()}
+        dec = c.setdefault("declined", [])
+        if code in dec:
+            dec.remove(code)
+        save_state()
+    finalize(cid)
+    return "✅ Красавчик! Отметил: %s %s" % (money(amount, c["currency"]), user_of(code)["name"]), None
+
+
+def chat_finalize_check(amount_msg, user_code, cid):
+    """Проверка: платежи есть и все не-отказники скинулись → close."""
+    return finalize(amount_msg)
+
+
+def chat_decline(cid, user):
+    c = STATE["collections"].get(cid)
+    if not c:
+        return None, "Сбор не найден"
+    with LOCK:
+        c = STATE["collections"].get(cid)
+        if not c:
+            return None, "Сбор не найден"
+        if c["status"] != "active":
+            return None, "Сбор уже закрыт"
+        code = str(user["id"])
+        if code in payments_of(cid):
+            return None, "Ты уже скинулся — сначала «Передумал» и потом отказ 🔄"
+        dec = c.setdefault("declined", [])
+        joined = c.setdefault("joined", [])
+        if code not in joined:
+            joined.append(code)
+        if code in dec:
+            dec.remove(code)  # toggle второй раз → снова в деле
+            save_state()
+            return "Снова в деле! 💪", None
+        dec.append(code)
+        save_state()
+    finalize(cid)
+    return "Отметил тебя как отказника 🙅", None
+
+
+def handle_callback(upd):
+    cq = upd.get("callback_query")
+    if not cq:
+        return
+    upsert_user(cq.get("from"))
+    data = cq.get("data") or ""
+    chat_id = (cq.get("message") or {}).get("chat", {}).get("id")
+    if ":" not in data:
+        tg("answerCallbackQuery", callback_query_id=cq["id"])
+        return
+    act, cid = data.split(":", 1)
+    if act == "hint":
+        if cid == "skor":
+            tg("answerCallbackQuery", callback_query_id=cq["id"],
+               text="Напиши боту: /skor Пицца по 400 до 25.10 — «по 400» с каждого, «на 5000» общая сумма, «до дата» дедлайн",
+               show_alert=True)
+        else:
+            tg("answerCallbackQuery", callback_query_id=cq["id"])
+        return
+    text = None
+    if act in ("p", "d", "j") and chat_id:
+        if act == "p":
+            text, err = chat_paid(cid, cq["from"])
+            if text == "png-amount":
+                tg("answerCallbackQuery", callback_query_id=cq["id"],
+                   text="Напиши мне сюда сумму, которую скинул — например «350»", show_alert=True)
+            elif err:
+                tg("answerCallbackQuery", callback_query_id=cq["id"], text=err, show_alert=True)
+            else:
+                tg("answerCallbackQuery", callback_query_id=cq["id"], text=text)
+        elif act == "d":
+            text, err = chat_decline(cid, cq["from"])
+            if err:
+                tg("answerCallbackQuery", callback_query_id=cq["id"], text=err, show_alert=True)
+            else:
+                tg("answerCallbackQuery", callback_query_id=cq["id"], text=text)
+        elif act == "j":
+            # «Передумал»: снять и галочку, и отказ — вернуться в ожидание
+            c = STATE["collections"].get(cid)
+            code = str(cq["from"]["id"])
+            if not c:
+                tg("answerCallbackQuery", callback_query_id=cq["id"], text="Сбор не найден", show_alert=True)
+            elif c["status"] != "active":
+                tg("answerCallbackQuery", callback_query_id=cq["id"], text="Сбор уже закрыт", show_alert=True)
+            else:
+                with LOCK:
+                    p = payments_of(cid)
+                    changed = False
+                    if code in p:
+                        p.pop(code)
+                        changed = True
+                    dec = c.setdefault("declined", [])
+                    if code in dec:
+                        dec.remove(code)
+                        joined = c.setdefault("joined", [])
+                        if code not in joined:
+                            joined.append(code)
+                        changed = True
+                    if changed:
+                        save_state()
+                tg("answerCallbackQuery", callback_query_id=cq["id"],
+                   text="Снова в ожидании 💤")
+    else:
+        tg("answerCallbackQuery", callback_query_id=cq["id"])
+    if act in ("p", "d", "j") and STATE["collections"].get(cid):
+        finalize(cid)
+        update_card(cid)
 
 
 # ────────────────────────────────────────────────── веб-вью (для приложения бота)
@@ -713,23 +923,101 @@ def finalize(cid):
 
 # ────────────────────────────────────────────────── команды бота
 
-def cmd_start(msg):
+def cmd_start(msg, payload=""):
+    if payload and payload in STATE["collections"]:
+        # пришли по chat-ссылке вида t.me/skidemsya_bot?start=c_xxx —
+        # показываем карточку сбора прямо в личном чате, аппа не нужна
+        cid = payload
+        c = STATE["collections"][cid]
+        cards = c.setdefault("cards", {})
+        if str(msg["chat"]["id"]) not in cards:
+            cards[str(msg["chat"]["id"])] = None
+        tag = "👋 Привет! Тебя позвали в сбор \u2014 отвечай прямо здесь, кнопками ниже" \
+              if c["status"] == "active" else "🏁 Сбор уже закрылся \u2014 вот его итоги:"
+        tg("sendMessage", chat_id=msg["chat"]["id"], text=tag, disable_web_page_preview=True)
+        update_card(cid)
+        if c["status"] == "active":
+            tg("sendMessage", chat_id=msg["chat"]["id"],
+               text="💡 Если аппа вдруг не открывается \u2014 всё то же самое можно делать здесь, кнопками на карточке.",
+               disable_web_page_preview=True)
+        return
     tg("sendMessage",
        chat_id=msg["chat"]["id"],
        text="Привет! 👋 Это <b>«Скинулись»</b> 💸 — котёл для общих трат.\n\n"
             "Пицца на всех, подарок другу, такси — собираете деньгами напрямую друг другу, "
             "а бот просто честно ведёт список:\n\n"
-            "1️⃣ <b>Создай сбор</b> — название, сколько с каждого, дедлайн\n"
-            "2️⃣ <b>Кинешь ссылку друзьям</b> — они откроют и скажут: «в деле» или «не участвую»\n"
-            "3️⃣ Каждый скинулся — жмёт кнопку, и <b>все видят, кто сколько скинул</b> ✅\n"
+            "1️⃣ <b>Создай сбор</b> — названием, суммой и дедлайном\n"
+            "2️⃣ <b>Кинешь ссылку друзьям</b> — они жмут кнопки прямо в чате\n"
+            "3️⃣ Каждый скинулся — жмёт «Я скинулся», и <b>все видят, кто сколько скинул</b> ✅\n"
             "4️⃣ Собрали всё — бот объявит итог 🎉\n\n"
-            "Всё в боте: не надо писать никому в личку, суммы и статусы — на одном экране.\n\n"
+            "Всё работает и в боте, и прямо в чате — каждый выберет, что удобнее.\n\n"
             "Жми кнопку 👇",
        parse_mode="HTML",
         reply_markup={"inline_keyboard": [
             [{"text": "＋ Создать сбор 💸", "url": deep_link("new")}],
-            [{"text": "🗂 Мои сборы", "url": deep_link("home")}],
+            [
+                {"text": "🗂 Мои сборы", "url": deep_link("home")},
+                {"text": "/skor — пример", "callback_data": "hint:skor"},
+            ],
         ]},
+       disable_web_page_preview=True)
+
+
+def handle_amount_text(msg, text):
+    """Юзер написал боту без команды: или сумму (если мы её ждали), или подсказку."""
+    user_code = uid(msg["from"])
+    chat_id = msg["chat"]["id"]
+    p = (STATE.get("pendings") or {}).get(user_code)
+    if p and time.time() - p.get("ts", 0) < 7200:
+        cid = p.get("cid")
+        c = STATE["collections"].get(cid)
+        if not c or c["status"] != "active":
+            STATE["pendings"].pop(user_code, None)
+            save_state()
+            return
+        m = re.search(r"\d[\d\s.,]{0,10}", text)
+        if not m:
+            tg("sendMessage", chat_id=chat_id,
+               text="Не понял 🙂 Напиши сумму просто числом — например «350», и я отмечу галочку.",
+               disable_web_page_preview=True)
+            return
+        try:
+            amount = int(re.sub(r"[^\d]", "", m.group(0))[:9])
+        except ValueError:
+            amount = 0
+        if amount <= 0 or amount > 10_000_000:
+            tg("sendMessage", chat_id=chat_id,
+               text="Такое вряд ли было 🙂 Напиши сумму числом, например «350».",
+               disable_web_page_preview=True)
+            return
+        STATE["pendings"].pop(user_code, None)
+        code = str(msg["from"]["id"])
+        with LOCK:
+            c = STATE["collections"][cid]
+            paid = payments_of(cid)
+            prev = paid.get(code)
+            # total/free: повторная сумма — это довнесение, складываем
+            if prev and c["mode"] != "per_person":
+                amount += int(prev.get("amount") or 0)
+            paid[code] = {"amount": amount, "paid_ts": time.time()}
+            if code not in c["joined"]:
+                c["joined"].append(code)
+            dec = c.setdefault("declined", [])
+            if code in dec:
+                dec.remove(code)
+            save_state()
+        finalize(cid)
+        update_card(cid)
+        tg("sendMessage", chat_id=chat_id,
+           text="✅ Отметил: ты скинулся %s. Карточка обновлена 👆" % money(amount, c["currency"]),
+           disable_web_page_preview=True)
+        return
+    tg("sendMessage", chat_id=chat_id,
+       text="Я не отвечаю на сообщения 🙂 Вся работа — в боте или по кнопкам на карточке сбора.\n"
+            "Команды: /help",
+       reply_markup={"inline_keyboard": [[
+           {"text": "＋ Создать сбор 💸", "url": deep_link("new")},
+       ]]},
        disable_web_page_preview=True)
 
 
@@ -787,6 +1075,11 @@ def cmd_help(msg):
             "<code>/skor Пицца по 400 до 25.10</code> — создать сбор в этом чате\n"
             "   <b>по 400</b> — с каждого; <b>на 5000</b> — общая сумма\n"
             "   <b>до 25.10</b>/<b>25.10 20:00</b> — дедлайн\n\n"
+            "У каждой карточки — кнопки: <b>✅ Я скинулся</b>, <b>🙅 Не участвую</b>, "
+            "<b>🔁 Передумал</b> и <b>🔗 Позвать друзей</b>. Всё работает прямо в чате — "
+            "аппа не обязательна, но удобнее всего там 📱\n\n"
+            "Со сборов «на 5000» и «кто сколько хочет»: после «✅ Я скинулся» напиши мне сумму "
+            "просто числом, например «350» — отмечу галочку.\n\n"
             "/list — сборы в этом чате\n"
             "/close — закрыть свой последний сбор\n"
             "/create — создать сбор в боте (без привязки к чату)\n"
@@ -885,6 +1178,10 @@ def parse_num(s):
 
 
 def handle_update(upd):
+    if "callback_query" in upd:
+        handle_callback(upd)
+        save()
+        return
     msg = upd.get("message")
     if not msg or "from" not in msg:
         return
@@ -892,20 +1189,15 @@ def handle_update(upd):
     chat_type = msg["chat"]["type"]
     text = (msg.get("text") or "").strip()
     if not text.startswith("/"):
-        # приложение бота работает в своём окне — лично боту писать не нужно
-        if msg["chat"]["type"] == "private":
-            tg("sendMessage", chat_id=msg["chat"]["id"],
-               text="Я не отвечаю на сообщения 🙂 Вся работа — внутри бота.",
-               reply_markup={"inline_keyboard": [[
-                   {"text": "＋ Создать сбор 💸", "url": deep_link("new")},
-               ]]},
-               disable_web_page_preview=True)
+        # приложение бота работает в своём окне — лично боту пишут только для сумм
+        if chat_type == "private" and text:
+            handle_amount_text(msg, text)
         return
     parts = text.split(" ", 1)
     cmd = parts[0].lower().split("@")[0]
     rest = parts[1] if len(parts) > 1 else ""
     if cmd == "/start":
-        cmd_start(msg)
+        cmd_start(msg, rest.strip())
     elif cmd == "/help":
         cmd_help(msg)
     elif cmd == "/skor":
