@@ -49,6 +49,7 @@ STATE = {
     "collections": {},  # "c_ab12" -> {...}
     "payments": {},     # "c_ab12" -> {"777": {"amount","paid_ts"}}
     "nags": {},         # "c_ab12:777:t24" -> ts
+    "hidden": {},       # "777" -> ["c_ab12", ...] — сборы, которые юзер убрал из своих (у других остаются)
 }
 LOCK = threading.RLock()
 # "chat_id:message_id" -> последний отправленный текст карточки (чтобы не гонять
@@ -106,6 +107,8 @@ def tg(method, **params):
     """Bot API POST. Возвращает result | None (всё молча в лог)."""
     if not BOT_TOKEN:
         return None
+    if os.environ.get("BOT_OFFLINE", "") == "1":  # тестовый режим без сети Telegram
+        return None
     params = {k: v for k, v in params.items() if v is not None}  # None в replyMarkup = Bad Request
     url = "%s/bot%s/%s" % ("https://api.telegram.org", BOT_TOKEN, method)
     req = urllib.request.Request(
@@ -140,8 +143,8 @@ def chat_link(start):
 
 
 def share_url(cid):
-    msg = "Вас пригласили в сбор «%s» 💸 Жми — и скажи, ты в деле или нет." % STATE["collections"][cid]["title"]
-    return ("https://t.me/share/url?url=" + urllib.parse.quote(chat_link(cid), safe="") +
+    msg = "Вас пригласили в сбор «%s» 💸 Жми — откроется сразу в приложении, и скажешь, ты в деле или нет." % STATE["collections"][cid]["title"]
+    return ("https://t.me/share/url?url=" + urllib.parse.quote(deep_link(cid), safe="") +
             "&text=" + urllib.parse.quote(msg, safe=""))
 
 
@@ -577,10 +580,11 @@ def chat_paid(cid, user, amount=None):
                 paid.pop(code, None)
                 save_state()
                 return "Галочку снял 🔄", None
-            # total/free: уже скинулся — это досыпание, ждём сумму текстом
+            # total/free: уже скинулся — досыпание; честно говорим, сколько есть,
+            # и что сумму на довнесение можно просто написать числом в чат
             STATE.setdefault("pendings", {})[code] = {"cid": cid, "ts": time.time()}
             save_state()
-            return "png-amount", None
+            return "paid-again", None
         if amount is None and c["mode"] == "per_person" and c["per_person"]:
             amount = c["per_person"]
         if amount is None:
@@ -665,7 +669,15 @@ def handle_callback(upd):
             text, err = chat_paid(cid, cq["from"])
             if text == "png-amount":
                 tg("answerCallbackQuery", callback_query_id=cq["id"],
-                   text="Напиши мне сюда сумму, которую скинул — например «350»", show_alert=True)
+                   text="Напиши сумму в поле ввода этого чата ⌨️ — например «350» — и я отмечу её в сборе",
+                   show_alert=True)
+            elif text == "paid-again":
+                cc = STATE["collections"].get(cid)
+                prev = int((payments_of(cid).get(str(cq["from"]["id"])) or {}).get("amount") or 0)
+                tg("answerCallbackQuery", callback_query_id=cq["id"],
+                   text="✅ Ты скинулся %s. Довнести ещё? Напиши сумму числом в поле ввода — приплюсую."
+                        % money(prev, (cc or {}).get("currency") or "₽"),
+                   show_alert=True)
             elif err:
                 tg("answerCallbackQuery", callback_query_id=cq["id"], text=err, show_alert=True)
             else:
@@ -771,7 +783,10 @@ def build_view(cid, me_code):
 
 def my_items(me_code):
     items = []
+    hidden = set((STATE.get("hidden") or {}).get(me_code) or [])
     for c in STATE["collections"].values():
+        if c["id"] in hidden:
+            continue  # юзер убрал этот сбор из своих — у других он остался
         paid = payments_of(c["id"])
         if me_code not in paid and me_code not in members_of(c["id"]):
             continue
@@ -799,6 +814,9 @@ def delete_collection(cid, by=None):
         chat_id, message_id, title = c.get("chat_id"), c.get("message_id"), c["title"]
         STATE["collections"].pop(cid, None)
         STATE["payments"].pop(cid, None)
+        for ids in STATE.get("hidden", {}).values():  # скрытый сбор удалён — чистим списки
+            while cid in ids:
+                ids.remove(cid)
         for k in [k for k in STATE["nags"] if k.startswith(cid + ":")]:
             STATE["nags"].pop(k, None)
         save_state()
@@ -1765,10 +1783,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"added": added, "view": build_view(cid, code)})
 
         if action == "delete":
-            err = delete_collection(cid, by=code)
-            if err:
-                return self.send_json({"error": err}, err == "только организатор" and 403 or 404)
-            return self.send_json({"deleted": True, "id": cid})
+            if code == c["created_by"]:
+                err = delete_collection(cid, by=code)
+                if err:
+                    return self.send_json({"error": err}, err == "только организатор" and 403 or 404)
+                return self.send_json({"deleted": True, "id": cid})
+            # не организатор: убрать только у себя — у организатора и остальных сбор остаётся
+            with LOCK:
+                STATE.setdefault("hidden", {}).setdefault(code, [])
+                if cid not in STATE["hidden"][code]:
+                    STATE["hidden"][code].append(cid)
+                save_state()
+            return self.send_json({"hidden": True, "id": cid})
 
         return self.send_json({"error": "не знаю такое"}, 404)
 
@@ -1907,12 +1933,14 @@ def register_commands():
 def main():
     load_state()
     global bot_username
+    offline = os.environ.get("BOT_OFFLINE", "") == "1"  # тесты: токен есть (для валидации initData), но в Telegram не ходим
     if BOT_TOKEN:
-        me = tg("getMe")
+        me = None if offline else tg("getMe")
         if me and me.get("username"):
             bot_username = me["username"]
-        register_commands()
-        threading.Thread(target=polling_loop, daemon=True).start()
+        if not offline:
+            register_commands()
+            threading.Thread(target=polling_loop, daemon=True).start()
     else:
         log.info("BOT_TOKEN не задан — запускается только веб-часть (демо-режим)")
     threading.Thread(target=scheduler_loop, daemon=True).start()

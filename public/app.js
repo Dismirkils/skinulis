@@ -289,7 +289,7 @@ function renderHome() {
   const tiles = S.home.length ? S.home.map(t => {
     const closed = t.status === 'closed';
     return '<div class="tile' + (closed ? ' done' : '') + '" data-nav="' + esc(t.id) + '">' +
-      (t.is_organizer ? '<button class="delsmall" data-del="' + esc(t.id) + '" title="Удалить">✕</button>' : '') +
+      '<button class="delsmall" data-del="' + esc(t.id) + '" title="' + (t.is_organizer ? 'Удалить' : 'Убрать из моих') + '">✕</button>' +
       '<div class="t">' + (closed ? '🏁 ' : (t.my_paid ? '✅ ' : '💸 ')) + esc(t.title) + '</div>' +
       '<div class="s">' +
         (closed ? '<span>итог подведён</span>' :
@@ -482,7 +482,7 @@ function renderCollection(c) {
   }
   const delRow = c.is_organizer
     ? '<div class="delrow"><button class="mini-btn danger" id="deleteColl">Удалить сбор</button></div>'
-    : '';
+    : '<div class="delrow"><button class="mini-btn ghost" id="deleteColl">🙈 Убрать из моих</button></div>';
 
   VIEW.innerHTML =
     '<div class="top">' +
@@ -652,6 +652,17 @@ document.addEventListener('click', async (ev) => {
   if (delBtn) {
     const id = delBtn.dataset.del;
     const t = S.home.find(x => x.id === id);
+    if (t && !t.is_organizer) {
+      const ok = await askConfirm('Убрать «' + (t ? t.title : 'сбор') + '» из твоих?\nУ организатора и остальных он останется.');
+      if (!ok) return;
+      if (S.demo) { S.home = S.home.filter(x => x.id !== id); haptic(); toast('Демо: убрано 🙈'); return render(); }
+      try {
+        await deleteById(id);
+        haptic(); beepOk(); toast('Убрал из твоих 🙈 (у других остался)');
+        await loadHome(); render();
+      } catch (e) { toast(e.message); }
+      return;
+    }
     const ok = await askConfirm('Удалить «' + (t ? t.title : 'сбор') + '»?\nКарточка в чате тоже снесётся. Это навсегда.');
     if (!ok) return;
     if (S.demo) {
@@ -730,6 +741,22 @@ document.addEventListener('click', async (ev) => {
   /* — удаление внутри сбора — */
   if (ev.target.id === 'deleteColl' && S.coll) {
     const c0 = S.coll;
+    if (!c0.is_organizer) {
+      const ok = await askConfirm('Убрать «' + c0.title + '» из твоих?\nУ организатора и остальных он останется.');
+      if (!ok) return;
+      if (S.demo) {
+        S.home = S.home.filter(t => t.id !== c0.id);
+        S.coll = null; S.tab = 'home';
+        haptic(); toast('Демо: убрано 🙈'); render(); return;
+      }
+      try {
+        await deleteById(c0.id);
+        haptic(); beepOk(); toast('Убрал из твоих 🙈 (у других остался)');
+        S.coll = null; S.tab = 'home';
+        await loadHome(); render();
+      } catch (e) { toast(e.message); }
+      return;
+    }
     const ok = await askConfirm('Удалить «' + c0.title + '»?\nКарточку в чате тоже снесём. Это навсегда.');
     if (!ok) return;
     if (S.demo) {
