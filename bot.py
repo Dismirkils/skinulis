@@ -16,6 +16,7 @@
 """
 
 import hashlib
+import gzip
 import hmac
 import html
 import json
@@ -1005,16 +1006,34 @@ class Handler(BaseHTTPRequestHandler):
                 body = body.replace(
                     b'<link rel="stylesheet" href="/app/style.css">',
                     b'<style>' + css + b'</style>')
-                body = re.sub(rb'<script src="/app/app\.js[^"]*"></script>',
-                              b'<script>' + js + b'</script>', body)
+                # ВАЖНО: не re.sub! в замене (JS-код) бэкслеши \d \n \s — re.sub читает их
+                # как свои esc-правила и портит код: у юзеров это давало
+                # «SyntaxError: Unexpected EOF / Invalid token»
+                start = body.find(b'<script src="/app/app.js')
+                if start != -1:
+                    end = body.find(b'</script>', start) + len(b'</script>')
+                    body = body[:start] + b'<script>' + js + b'</script>' + body[end:]
             except OSError:
                 pass
         self.send_response(200)
+        body = self.maybe_gzip(body)
         self.send_header("Content-Type", self.MIME.get(ext, "application/octet-stream"))
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def maybe_gzip(self, body):
+        """На слабом LTE обрыв 45-килобайтного ответа давал SyntaxError: Unexpected EOF.
+        Сжимаем до ~12 КБ — грузится быстрее и меньше поверхность обрыва."""
+        if "gzip" not in (self.headers.get("Accept-Encoding") or ""):
+            return body
+        g = gzip.compress(body, 6)
+        if len(g) >= len(body):
+            return body
+        self.send_header("Content-Encoding", "gzip")
+        self.send_header("Vary", "Accept-Encoding")
+        return g
 
     # ---------- API
 

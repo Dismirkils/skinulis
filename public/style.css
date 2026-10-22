@@ -142,6 +142,12 @@ body {
   font: inherit; font-size: 14px;
 }
 .chips .chip.on { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+
+/* CTA в форме — отдельная строка, полноширинная, не липнет к полю реквизитов */
+.card .mini-btn.go {
+  display: block; width: 100%; margin-top: 16px; padding: 13px;
+  text-align: center; font-size: 16px; border-radius: 12px;
+}
 .fl + input, .org-panel input, .dl-row input, input[type=date], input[type=time],
 input#fTitle, input#fPer, input#fGoal, input#fHint {
   width: 100%; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line);
