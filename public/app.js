@@ -106,6 +106,10 @@ const DEMO = () => ({
 
 /* ─────────── boot */
 
+  function nasleep(ms) {
+    return new Promise(res => window.setTimeout(res, ms));
+  }
+
   async function boot() {
     try {
       if (tg) {
@@ -119,22 +123,36 @@ const DEMO = () => ({
         || new URLSearchParams(location.search).get('startapp')
         || 'home';
 
-      try {
-        const r = await api('/api/init', {
-          method: 'POST',
-          body: JSON.stringify({ start_param: startParam }),
-          headers: Object.assign(
-            tg && tg.initData ? { 'Authorization': 'tma ' + tg.initData } : {},
-            { 'Content-Type': 'application/json' }
-          ),
-        });
-        S.user = r.user; S.bot = r.bot_username;
-        if (r.collection) { S.tab = 'collection'; S.coll = r.collection; }
-      } catch (e) {
+      let inited = false;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const r = await api('/api/init', {
+            method: 'POST',
+            body: JSON.stringify({ start_param: startParam }),
+            headers: Object.assign(
+              tg && tg.initData ? { 'Authorization': 'tma ' + tg.initData } : {},
+              { 'Content-Type': 'application/json' }
+            ),
+          });
+          S.user = r.user; S.bot = r.bot_username;
+          if (r.collection) { S.tab = 'collection'; S.coll = r.collection; }
+          inited = true;
+          break;
+        } catch (e) {
+          // 401 (нет initData — открыто не в Telegram) сразу без ретрая
+          if (e && e.message === 'auth') break;
+          // сеть глюканула — одна мягкая попытка ещё раз
+          if (attempt === 0) nasleep(1200);
+        }
+      }
+      if (!inited) {
+        const hasAuth = tg && tg.initData;
         const d = DEMO();
         S.user = d.demoUser; S.demo = true;
         $('#banner').hidden = false;
-        $('#banner').textContent = '🧪 Демо-режим — так это выглядит в Telegram';
+        $('#banner').textContent = hasAuth
+          ? '🚫 Telegram дал данные, но сервер не принял — попробуй открыть бота заново'
+          : '🧪 Демо-режим — это превью. Открывай бота из Telegram, чтобы работать по-настоящему.';
         if (startParam.startsWith('c_')) {
           S.tab = 'collection';
           S.coll = d.collections.find(c => c.id === startParam) || d.collections[0];

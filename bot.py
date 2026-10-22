@@ -157,6 +157,11 @@ def validate_init_data(init_data):
             if k == "hash":
                 hash_ = v
                 continue
+            if k == "signature":
+                # Telegram Bot API 7+: подпись Ed25519 ГЛОБАЛЬНАЯ — её НЕ включают в data_check_string.
+                # Без этого у реальных клиентов (initData содержит signature=...) HMAC не совпадал
+                # и ВСЕ попадали в демо-режим.
+                continue
             d[k] = v
         if not hash_:
             return None
@@ -1184,18 +1189,33 @@ def cmd_create(msg):
        disable_web_page_preview=True)
 
 
+def deletables(chat, who):
+    """Сборы организатора для /delete: активные и закрытые (в личке — все)."""
+    private = chat["type"] == "private"
+    with LOCK:
+        mine = [c for c in STATE["collections"].values()
+                if c["created_by"] == str(who)
+                and (private or c.get("chat_id") == chat["id"])]
+        mine.sort(key=lambda c: c["created_ts"], reverse=True)
+    return mine
+
+
 def cmd_delete(msg, args):
     chat = msg["chat"]
     who = uid(msg["from"])
-    mine = collections_of(chat, who)
+    mine = deletables(chat, who)
     if not mine:
         tg("sendMessage", chat_id=chat["id"],
-           text="Твоих активных сборов тут нет. 🤷", disable_web_page_preview=True)
+           text="🗑 У тебя пока нет своих сборов. Создать: /skor Пицца по 400", disable_web_page_preview=True)
         return
     n = parse_num(args)
     if n is None:
         lines = ["🗑 <b>Что снести?</b> Напиши номер: /delete 1, 2, 3…\n"]
-        lines += ["%d) 💸 %s" % (i, html.escape(c["title"])) for i, c in enumerate(mine, 1)]
+        for i, c in enumerate(mine, 1):
+            if c["status"] == "closed":
+                lines.append("%d) 🏁 %s (закрыт)" % (i, html.escape(c["title"])))
+            else:
+                lines.append("%d) 💸 %s" % (i, html.escape(c["title"])))
         tg("sendMessage", chat_id=chat["id"], text="\n".join(lines), parse_mode="HTML",
            disable_web_page_preview=True)
         return
