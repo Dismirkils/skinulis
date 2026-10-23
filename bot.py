@@ -573,6 +573,8 @@ def chat_paid(cid, user, amount=None):
         if c["status"] != "active":
             return None, "Сбор уже закрыт"
         code = str(user["id"])
+        if code in (c.get("left") or []):
+            return None, "Ты вышел из этого сбора — вернуться можно в приложении «⭕ В деле» 👆"
         paid = payments_of(cid)
         if code in paid:
             if c["mode"] == "per_person":
@@ -624,6 +626,8 @@ def chat_decline(cid, user):
         if c["status"] != "active":
             return None, "Сбор уже закрыт"
         code = str(user["id"])
+        if code in (c.get("left") or []):
+            return None, "Ты вышел из этого сбора — вернуться можно в приложении «⭕ В деле» 👆"
         if code in payments_of(cid):
             return None, "Ты уже скинулся — сначала «Передумал» и потом отказ 🔄"
         dec = c.setdefault("declined", [])
@@ -651,6 +655,14 @@ def handle_callback(upd):
         tg("answerCallbackQuery", callback_query_id=cq["id"])
         return
     act, cid = data.split(":", 1)
+    c = STATE["collections"].get(cid)
+    code = str(cq.get("from", {}).get("id"))
+    # вышедший участник нажимает старые кнопки — не зачисляем обратно (возврат — «⭕ В деле» в аппе)
+    if act in ("p", "d", "j") and c and code in (c.get("left") or []):
+        tg("answerCallbackQuery", callback_query_id=cq["id"],
+           text="Ты вышел из этого сбора — вернуться можно в приложении: «⭕ В деле» по ссылке 👆",
+           show_alert=True)
+        return
     if act == "hint":
         if cid == "skor":
             tg("answerCallbackQuery", callback_query_id=cq["id"],
@@ -1736,6 +1748,8 @@ class Handler(BaseHTTPRequestHandler):
             if c["status"] != "active":
                 return self.send_json({"error": "Сбор закрыт"}, 409)
             with LOCK:
+                if code in c.get("left", []):
+                    c["left"].remove(code)
                 dec = c.get("declined") or []
                 if code in dec:
                     dec.remove(code)
@@ -1749,6 +1763,8 @@ class Handler(BaseHTTPRequestHandler):
         if action == "decline":
             if c["status"] != "active":
                 return self.send_json({"error": "Сбор закрыт"}, 409)
+            if code in (c.get("left") or []):
+                return self.send_json({"error": "Ты вышел из сбора — вернуться можно «⭕ В деле» 👆"}, 409)
             if code in payments_of(cid):
                 return self.send_json({"error": "Ты уже скинулся — сначала убери галочку ↩️"}, 409)
             with LOCK:
@@ -1816,8 +1832,23 @@ class Handler(BaseHTTPRequestHandler):
                     changed = True
                 if not changed:
                     return self.send_json({"error": "Тебя и так нет в этом сборе"}, 400)
+                c.setdefault("left", [])
+                if code not in c["left"]:
+                    c["left"].append(code)
                 save_state()
             update_card(cid)
+            # личная карточка вышедшего: снять кнопки и честно сказать, что он вышел
+            with LOCK:
+                cards = c.setdefault("cards", {})
+                mid = cards.pop(str(code), None)
+                if mid:
+                    save_state()
+            if mid and BOT_TOKEN:
+                tg("editMessageText", chat_id=int(code), message_id=mid,
+                   text="🚪 <b>Ты вышел из сбора «%s»</b>.\nУ остальных он остался. Вернуться можно в приложении — «⭕ В деле» по ссылке. 🙃"
+                        % html.escape(c["title"]),
+                   parse_mode="HTML", reply_markup={"inline_keyboard": []},
+                   disable_web_page_preview=True)
             finalize(cid)
             return self.send_json({"left": True, "view": build_view(cid, code)})
 
