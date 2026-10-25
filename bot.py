@@ -1561,7 +1561,8 @@ class Handler(BaseHTTPRequestHandler):
         body = self.maybe_gzip(body)
         self.send_header("Content-Type", self.MIME.get(ext, "application/octet-stream"))
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        cc = "public, max-age=604800" if fname == "telegram-web-app.js" else "no-store"
+        self.send_header("Cache-Control", cc)
         self.end_headers()
         self.wfile.write(body)
 
@@ -1582,6 +1583,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split("?")[0]
         body = self.read_json()
+        # диагностика клиентов без initData (App Store / Web): что именно пришло в URL и есть ли мост
+        if path == "/api/clientdiag":
+            try:
+                rec = {k: str(body.get(k) or "")[:300] for k in
+                       ("ua", "platform", "hashKeys", "hasTelegram", "startParam", "href")}
+                with open(os.path.join(DATA_DIR, "debug_client.log"), "a", encoding="utf-8") as f:
+                    f.write("[%s] %s\n" % (time.strftime("%d.%m %H:%M:%S"), json.dumps(rec, ensure_ascii=False)))
+            except Exception:
+                pass
+            return self.send_json({"ok": True})
         me = self.authorize()
         if not me:
             return self.send_json({"error": "нужен Telegram initData"}, 401)

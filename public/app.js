@@ -51,6 +51,24 @@ function isDark(hex) {
 const tgOfficial = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
 const tgShim_ = buildTelegramShim();
 const tg = (tgOfficial && (tgOfficial.initData || !tgShim_)) ? tgOfficial : (tgShim_ || tgOfficial);
+/* диагностика клиентов без initData (App Store / Web): один раз шлём, что пришло */
+if (!(tg && tg.initData) && !window.__diagSent) {
+  window.__diagSent = true;
+  try {
+    const hk = Array.from(new URLSearchParams((location.hash || '').replace(/^[#/]*/, '')).keys()).join(',');
+    fetch('/api/clientdiag', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ua: navigator.userAgent,
+        platform: (tg && tg.platform) || '',
+        hashKeys: hk,
+        hasTelegram: !!(window.Telegram && window.Telegram.WebApp),
+        startParam: (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param) || '',
+        href: location.href.split('?')[0] + '#' + (location.hash || '').slice(1, 60),
+      }),
+    }).catch(() => {});
+  } catch (e) {}
+}
 const $ = (p) => document.querySelector(p);
 const VIEW = $('#view');
 
