@@ -5,7 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <title>Скинулись 💸</title>
 <link rel="stylesheet" href="/app/style.css">
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<!-- официальный telegram-web-app.js больше не грузим: на части сетей telegram.org
+     недоступен, и блокирующий <script> вешал аппу белым экраном. Мост собирается
+     своим шимом из tgWebAppData в URL (см. public/app.js → buildTelegramShim). -->
 <script>
 /* до всего: любые падения — сразу на экране, а не «белый экран» */
 window.addEventListener('error', function (e) {
