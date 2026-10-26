@@ -815,6 +815,96 @@ def my_items(me_code):
     return items
 
 
+def build_stats():
+    """Сводка для владельца: пользователи, сборы, оплаты, активность."""
+    with LOCK:
+        users = dict(STATE.get("users") or {})
+        collections = dict(STATE.get("collections") or {})
+        payments = dict(STATE.get("payments") or {})
+        hidden = dict(STATE.get("hidden") or {})
+    test_ids = TEST_USER_IDS
+    real_users = {uid: u for uid, u in users.items() if uid not in test_ids and not str(uid).startswith("900")}
+    active = [c for c in collections.values() if c.get("status") == "active"]
+    closed = [c for c in collections.values() if c.get("status") != "active"]
+    pay_count = 0
+    total_paid = 0
+    for cid, p in payments.items():
+        for uid, info in (p or {}).items():
+            pay_count += 1
+            total_paid += (info or {}).get("amount") or 0
+    participants = set()
+    for c in collections.values():
+        participants.update(c.get("joined") or [])
+        participants.update(c.get("declined") or [])
+    # суммы по сборам
+    coll_amounts = []
+    for c in collections.values():
+        p = payments.get(c["id"]) or {}
+        amt = sum((info or {}).get("amount", 0) for info in p.values())
+        coll_amounts.append((amt, c))
+    top = sorted(coll_amounts, key=lambda x: x[0], reverse=True)[:5]
+    recent = sorted(collections.values(), key=lambda c: c.get("created_ts") or 0, reverse=True)[:12]
+    # активность за 7 дней
+    now = time.time()
+    week_ago = now - 7 * 86400
+    colls_7 = sum(1 for c in collections.values() if (c.get("created_ts") or 0) >= week_ago)
+    pays_7 = 0
+    for cid, p in payments.items():
+        for info in (p or {}).values():
+            if (info or {}).get("paid_ts", 0) >= week_ago:
+                pays_7 += 1
+    hidden_count = sum(len(v or []) for v in hidden.values())
+    left_count = 0
+    for c in collections.values():
+        # «вышли» не хранятся отдельно — считаем declined? оставим 0
+        pass
+    return {
+        "users_total": len(users),
+        "users_real": len(real_users),
+        "users_test": len(users) - len(real_users),
+        "collections_total": len(collections),
+        "collections_active": len(active),
+        "collections_closed": len(closed),
+        "payments_count": pay_count,
+        "payments_sum": total_paid,
+        "participants_unique": len(participants),
+        "hidden_marks": hidden_count,
+        "colls_7": colls_7,
+        "pays_7": pays_7,
+        "top": top,
+        "recent": recent,
+        "real_users": real_users,
+        "payments": payments,
+    }
+
+
+def cmd_stat(msg):
+    """Статистика — только для владельца."""
+    code = str((msg.get("from") or {}).get("id"))
+    if code != str(OWNER_ID):
+        return
+    s = build_stats()
+    lines = [
+        "📊 <b>Статистика бота</b>",
+        "",
+        "👥 Пользователей: %d (реальных %d, тестовых %d)" % (s["users_total"], s["users_real"], s["users_test"]),
+        "🗂 Сборов: %d (активных %d, закрытых %d)" % (s["collections_total"], s["collections_active"], s["collections_closed"]),
+        "💸 Оплат: %d на сумму %d ₽" % (s["payments_count"], s["payments_sum"]),
+        "🤝 Уникальных участников: %d" % s["participants_unique"],
+        "🙈 Скрытых у себя: %d" % s["hidden_marks"],
+        "",
+        "За 7 дней: сборов %d, оплат %d" % (s["colls_7"], s["pays_7"]),
+    ]
+    if s["top"]:
+        lines.append("")
+        lines.append("🏆 Топ по суммам:")
+        for amt, c in s["top"]:
+            if amt <= 0:
+                continue
+            lines.append("  • %s — %d ₽ (%s)" % (html.escape(c.get("title", "?")), amt, c.get("status", "?")))
+    tg("sendMessage", chat_id=OWNER_ID, text="\n".join(lines), parse_mode="HTML")
+
+
 def delete_collection(cid, by=None):
     """Удалить сбор и всё, что к нему прицеплено. Ошибка — строкой, иначе None."""
     with LOCK:
@@ -1458,6 +1548,8 @@ def handle_update(upd):
         cmd_delete(msg, args=rest)
     elif cmd == "/edit":
         cmd_edit(msg, args=rest)
+    elif cmd == "/stat":
+        cmd_stat(msg)
     else:
         pass  # неизвестная команда — молчим
     save()
@@ -1565,6 +1657,69 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", cc)
         self.end_headers()
         self.wfile.write(body)
+
+    def send_stats_page(self):
+        s = build_stats()
+        def esc(x): return html.escape(str(x))
+        def row(label, value):
+            return "<tr><td>%s</td><td><b>%s</b></td></tr>" % (esc(label), esc(value))
+        top_html = "".join(
+            "<tr><td>%s</td><td>%d ₽</td><td>%s</td></tr>" % (esc(c.get("title", "?")), amt, esc(c.get("status", "?")))
+            for amt, c in s["top"] if amt > 0)
+        recent_html = "".join(
+            "<tr><td>%s</td><td>%s</td><td>%s</td><td>%d</td></tr>" % (
+                esc(c.get("title", "?")), esc(c.get("status", "?")),
+                datetime.fromtimestamp(c.get("created_ts") or 0).strftime("%d.%m %H:%M"),
+                len(c.get("joined") or []))
+            for c in s["recent"])
+        users_html = "".join(
+            "<tr><td>%s</td><td>%s</td></tr>" % (esc(uid), esc(u.get("username") or u.get("name") or "—"))
+            for uid, u in sorted(s["real_users"].items()))
+        body = ("<!doctype html><html lang=ru><head><meta charset=utf-8>"
+                "<meta name=viewport content='width=device-width,initial-scale=1'>"
+                "<meta http-equiv=refresh content=60>"
+                "<title>Скинулись — статистика</title>"
+                "<style>body{font:14px/1.5 -apple-system,system-ui,sans-serif;background:#0f1117;color:#eaeaf0;margin:0;padding:20px}"
+                "h1{font-size:20px;margin:0 0 14px}h2{font-size:15px;margin:18px 0 6px;color:#8b8b97}"
+                "table{width:100%%;border-collapse:collapse;margin:6px 0 14px}td,th{padding:6px 8px;border-bottom:1px solid #2b2b37;text-align:left}"
+                "td b{color:#4dc987}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:10px 0 18px}"
+                ".card{background:#1a1d26;border:1px solid #2b2b37;border-radius:10px;padding:12px}"
+                ".card .v{font-size:22px;font-weight:700;color:#4dc987}.card .l{font-size:12px;color:#8b8b97;margin-top:2px}"
+                ".muted{color:#8b8b97;font-size:12px}</style></head><body>"
+                "<h1>📊 Скинулись — статистика</h1>"
+                "<div class=muted>Обновляется каждые 60 с. Время: %s</div>"
+                "<div class=cards>"
+                "<div class=card><div class=v>%d</div><div class=l>Пользователей (всего)</div></div>"
+                "<div class=card><div class=v>%d</div><div class=l>Реальных (без тестовых)</div></div>"
+                "<div class=card><div class=v>%d</div><div class=l>Сборов (активных)</div></div>"
+                "<div class=card><div class=v>%d</div><div class=l>Сборов (закрытых)</div></div>"
+                "<div class=card><div class=v>%d</div><div class=l>Оплат (шт.)</div></div>"
+                "<div class=card><div class=v>%d ₽</div><div class=l>Сумма оплат</div></div>"
+                "<div class=card><div class=v>%d</div><div class=l>Уникальных участников</div></div>"
+                "<div class=card><div class=v>%d / %d</div><div class=l>За 7 дней: сборов / оплат</div></div>"
+                "</div>"
+                "<h2>🏆 Топ сборов по сумме</h2>"
+                "<table><tr><th>Название</th><th>Сумма</th><th>Статус</th></tr>%s</table>"
+                "<h2>🗂 Последние сборы</h2>"
+                "<table><tr><th>Название</th><th>Статус</th><th>Создан</th><th>Участников</th></tr>%s</table>"
+                "<h2>👥 Пользователи</h2>"
+                "<table><tr><th>ID</th><th>Имя / @username</th></tr>%s</table>"
+                "</body></html>" % (
+            datetime.now().strftime("%d.%m.%Y %H:%M:%S"),
+            s["users_total"], s["users_real"],
+            s["collections_active"], s["collections_closed"],
+            s["payments_count"], s["payments_sum"], s["participants_unique"],
+            s["colls_7"], s["pays_7"],
+            top_html or "<tr><td colspan=3 class=muted>пока нет оплат</td></tr>",
+            recent_html or "<tr><td colspan=4 class=muted>пока нет сборов</td></tr>",
+            users_html or "<tr><td colspan=2 class=muted>—</td></tr>"))
+        body_b = body.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body_b)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body_b)
 
     def maybe_gzip(self, body):
         """На слабом LTE обрыв 45-килобайтного ответа давал SyntaxError: Unexpected EOF.
@@ -1882,6 +2037,23 @@ class Handler(BaseHTTPRequestHandler):
         me = self.authorize()
         if path == "/health":  # пульс для мониторинга bothost
             return self.send_json({"ok": True, "port": PORT, "bot": bool(BOT_TOKEN)})
+        if path == "/stats":
+            # статистика только для владельца: по секретному ключу (из URL) или по initData владельца
+            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+            key = (qs.get("key") or [""])[0]
+            owner_by_key = secrets.compare_digest(key, STATS_KEY) if key else False
+            owner_by_init = False
+            if not owner_by_key:
+                try:
+                    init_hdr = self.headers.get("Authorization", "")
+                    rd = {}
+                    u = validate_init_data(init_hdr[4:] if init_hdr.startswith("tma ") else init_hdr, rd)
+                    owner_by_init = bool(u) and str(uid(u)) == str(OWNER_ID)
+                except Exception:
+                    owner_by_init = False
+            if not (owner_by_key or owner_by_init):
+                return self.send_json({"error": "not_found"}, 404)
+            return self.send_stats_page()
         if path.startswith("/api"):
             if not me:
                 return self.send_json({"error": "нужен Telegram initData"}, 401)
@@ -1971,6 +2143,11 @@ BOT_COMMANDS = [
 
 WEBAPP_URL = os.environ.get(
     "WEBAPP_URL", "https://bot-1792527651-5464-faslor.bothost.tech/app")
+
+# ── статистика (только для владельца) ──
+OWNER_ID = int(os.environ.get("OWNER_ID", "170269038"))
+STATS_KEY = os.environ.get("STATS_KEY", "skidulis-stats-2026")
+TEST_USER_IDS = {"555", "777222", "777001", "777002", "777003", "777004"}
 
 
 def reply_keyboard():
