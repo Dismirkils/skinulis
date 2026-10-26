@@ -1593,6 +1593,18 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             return self.send_json({"ok": True})
+        # «визитка»: один пинг на загрузку страницы (без auth). Показывает, что
+        # страница вообще дошла до клиента, в каком окружении и на каком этапе
+        # умерла, если JS упал (stage=load/appjs/js-error).
+        if path == "/api/visit":
+            try:
+                rec = {k: str(body.get(k) or "")[:300] for k in
+                       ("stage", "msg", "ua", "href", "hash", "hasTG", "vw", "vh")}
+                with open(os.path.join(DATA_DIR, "debug_visits.log"), "a", encoding="utf-8") as f:
+                    f.write("[%s] %s\n" % (time.strftime("%d.%m %H:%M:%S"), json.dumps(rec, ensure_ascii=False)))
+            except Exception:
+                pass
+            return self.send_json({"ok": True})
         me = self.authorize()
         if not me:
             return self.send_json({"error": "нужен Telegram initData"}, 401)

@@ -18,6 +18,36 @@ window.addEventListener('error', function (e) {
   b.textContent = '💥 ' + (e.message ? e.message : 'ошибка загрузки');
 });
 </script>
+<script>
+/* визитка: один пинг на загрузку страницы — по нему с сервера видно, что
+   страница дошла до клиента, в каком окружении открылась и на каком этапе
+   умерла, если что-то пошло не так (stage=load → appjs → init / js-error). */
+(function () {
+  var sent = {};
+  function ping(stage, msg) {
+    if (sent[stage]) return; // не более одного пинга на стадию
+    sent[stage] = true;
+    try {
+      fetch('/api/visit', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        keepalive: true,
+        body: JSON.stringify({
+          stage: stage || 'load',
+          msg: (msg || '').slice(0, 200),
+          ua: navigator.userAgent,
+          href: location.href.split('#')[0],
+          hash: (location.hash || '').slice(1, 120),
+          hasTG: !!(window.Telegram && window.Telegram.WebApp),
+          vw: innerWidth, vh: innerHeight
+        })
+      }).catch(function () {});
+    } catch (e) {}
+  }
+  window.__skidVisit = ping;
+  ping('load');
+  addEventListener('error', function (e) { ping('js-error', (e && e.message) || 'unknown'); });
+})();
+</script>
 </head>
 <body>
 <div id="banner" class="banner" hidden>🧪 Демо-режим — так это выглядит в Telegram</div>

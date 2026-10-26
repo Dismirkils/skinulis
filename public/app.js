@@ -69,6 +69,8 @@ if (!(tg && tg.initData) && !window.__diagSent) {
     }).catch(() => {});
   } catch (e) {}
 }
+/* app.js дошёл до конца верхнего уровня — разметка моста готова */
+if (window.__skidVisit) window.__skidVisit('appjs');
 const $ = (p) => document.querySelector(p);
 const VIEW = $('#view');
 
