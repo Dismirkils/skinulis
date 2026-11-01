@@ -22,9 +22,11 @@ function buildTelegramShim() {
   const noopBtn = { onClick() {}, offClick() {}, show() {}, hide() {}, setText() {}, showProgress() {}, hideProgress() {} };
   const shim = {
     initData: initData,
-    initDataUnsafe: Object.assign({}, user, {
+    isShim: true,
+    initDataUnsafe: {
+      user,
       start_param: kv.start_param || hash.get('tgWebAppStartParam') || query.get('tgWebAppStartParam') || ''
-    }),
+    },
     themeParams: theme,
     version: hash.get('tgWebAppVersion') || 'shim',
     platform: hash.get('tgWebAppPlatform') || 'unknown',
@@ -35,9 +37,10 @@ function buildTelegramShim() {
     BackButton: noopBtn,
     MainButton: Object.assign({}, noopBtn),
     HapticFeedback: { impactOccurred() {}, notificationOccurred() {}, selectionChanged() {} },
-    openTelegramLink() {}, openLink() {},
+    openTelegramLink(url) { window.open(url, '_blank', 'noopener'); },
+    openLink(url) { window.open(url, '_blank', 'noopener'); },
     showConfirm(msg, cb) { if (cb) cb(window.confirm(msg)); },
-    showAlert(cb) { if (cb) cb(); },
+    showAlert(msg, cb) { window.alert(msg); if (cb) cb(); },
     readTextFromClipboard(cb) { if (cb) cb(''); },
   };
   return shim;
@@ -64,7 +67,6 @@ if (!(tg && tg.initData) && !window.__diagSent) {
         hashKeys: hk,
         hasTelegram: !!(window.Telegram && window.Telegram.WebApp),
         startParam: (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param) || '',
-        href: location.href.split('?')[0] + '#' + (location.hash || '').slice(1, 60),
       }),
     }).catch(() => {});
   } catch (e) {}
@@ -83,12 +85,19 @@ const S = {
   home: [],          // «мои сборы»
   formPool: undefined,
   form: null,        // {mode:'create'|'edit', chip, data}
-  introDone: localStorage.getItem('skinulis_intro_v2') === '1',
+  introDone: (() => { try { return localStorage.getItem('skinulis_intro_v2') === '1'; } catch (_) { return false; } })(),
 };
 
 /* ─────────── утилиты */
 
 const money = (n, cur = '₽') => n == null ? '' : n.toLocaleString('ru-RU') + ' ' + cur;
+
+function parseAmount(raw) {
+  const value = String(raw == null ? '' : raw).trim().replace(/[ \u00a0\u202f]/g, '');
+  if (!/^[0-9]{1,8}$/.test(value)) return null;
+  const n = Number(value);
+  return n > 0 && n <= 10000000 ? n : null;
+}
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
@@ -218,6 +227,7 @@ const DEMO = () => ({
       }
       if (!inited) {
         const hasAuth = tg && tg.initData;
+        if (hasAuth) throw new Error('Сервер не принял данные Telegram. Закрой приложение и открой заново.');
         const d = DEMO();
         S.user = d.demoUser; S.demo = true;
         $('#banner').hidden = false;
@@ -233,6 +243,7 @@ const DEMO = () => ({
       }
 
       await loadHome();
+      if (startParam === 'new') { openCreate(); return; }
       render();
       if (!S.introDone) showIntro();
     } catch (e) {
@@ -362,10 +373,10 @@ function renderForm() {
   let sumHtml;
   if (chip === 'per') {
     sumHtml = '<label class="fl">С каждого по</label>' +
-      '<input id="fPer" inputmode="numeric" placeholder="400" value="' + (d.per_person || '') + '">';
+      '<input id="fPer" inputmode="numeric" placeholder="400" value="' + esc(d.per_person || '') + '">';
   } else if (chip === 'sum') {
     sumHtml = '<label class="fl">Собираем всего</label>' +
-      '<input id="fGoal" inputmode="numeric" placeholder="5000" value="' + (d.goal_total || '') + '">';
+      '<input id="fGoal" inputmode="numeric" placeholder="5000" value="' + esc(d.goal_total || '') + '">';
   } else {
     sumHtml = '<div class="sub" style="margin:2px 0 0">Каждый введёт свою сумму сам 🎲</div>';
   }
@@ -433,13 +444,13 @@ function renderCollection(c) {
       '<div class="mystatus"><span class="emoji">✅</span>' +
       '<div><div class="big" style="font-size:22px">' + money(c.my_amount, c.currency) + '</div>' +
       '<div class="sub">Ты скинулся. Красавчик 💪</div></div></div>' +
-      '<div class="org-actions single"><button class="mini-btn ghost" id="unpayMe">↩️ Убрать галочку</button></div>' +
+      (c.status === 'active' ? '<div class="org-actions single"><button class="mini-btn ghost" id="unpayMe">↩️ Убрать галочку</button></div>' : '') +
       '</div>';
   } else if (st === 'declined') {
     mine = '<div class="card"><div class="mystatus"><span class="emoji">🚫</span>' +
       '<div><div class="big" style="font-size:20px">Ты не участвуешь</div>' +
       '<div class="sub">Список и статусы смотреть можно. Если передумал — кнопка ниже. Никто не осудит 🙂</div></div></div>' +
-      '<div class="org-actions single"><button class="mini-btn ghost" id="joinMe">↩️ Вернуться в сбор</button></div></div>';
+      (c.status === 'active' ? '<div class="org-actions single"><button class="mini-btn ghost" id="joinMe">↩️ Вернуться в сбор</button></div>' : '') + '</div>';
   } else if (st === 'none' && c.status === 'active') {
     mine = '<div class="card"><h2>Ты участвуешь?</h2>' +
       '<div class="sub">Нажми «В деле» — попадёшь в список. Скинешься потом, кнопка будет внизу экрана</div>' +
@@ -454,6 +465,7 @@ function renderCollection(c) {
         : '<div class="mystatus"><span class="emoji">🎲</span>' +
           '<div><div class="sub">Введи свою сумму и жми «Я скинулся» внизу экрана 👇</div></div></div>' +
           '<input class="free-input" id="amount" inputmode="numeric" placeholder="300">') +
+      '<button class="mini-btn go" id="payInline">Я скинулся ✅</button>' +
       '<div class="org-actions single"><button class="mini-btn ghost" id="declineMe">🚫 Не участвую</button></div>' +
       '</div>';
   } else {
@@ -553,17 +565,27 @@ function renderButtons() {
   }
 }
 
+let paying = false;
 async function markPaid() {
+  if (paying || !S.coll || S.coll.status !== 'active' || meStateOf(S.coll) !== 'waiting') return;
+  paying = true;
+  try { await performPaid(); } finally { paying = false; }
+}
+
+async function performPaid() {
   let c = S.coll;
   let amount = c.my_amount;
   if (S.demo) {
-    amount = c.mode === 'per_person' ? c.per_person : (parseInt(($('#amount') || {}).value, 10) || 300);
-    c.my_paid = true; c.my_amount = amount; c.paid_count++; c.total = (c.total || 0) + amount;
+    amount = c.mode === 'per_person' ? c.per_person : parseAmount(($('#amount') || {}).value);
+    if (!amount) { toast('Введи целую сумму'); return; }
+    const row = c.roster.find(r => r.me);
+    if (row) { row.paid = true; row.amount = amount; row.declined = false; }
+    c.my_paid = true; c.me_state = 'paid'; c.my_amount = amount; c.paid_count++; c.total = (c.total || 0) + amount;
     beepOk(); toast('Демо: засчитали ' + money(amount, c.currency) + ' 💰'); render(); return;
   }
   if (c.mode !== 'per_person') {
     const raw = $('#amount') ? $('#amount').value : '';
-    amount = parseInt(raw, 10);
+    amount = parseAmount(raw);
     if (!amount || amount <= 0) { toast('Введи сумму'); return; }
   }
   try {
@@ -600,28 +622,46 @@ function nameOf(id) {
   return t ? t.title : '';
 }
 
+function captureForm() {
+  if (!S.form) return;
+  const d = S.form.data;
+  const fields = {fTitle: 'title', fPer: 'per_person', fGoal: 'goal_total', fHint: 'pay_hint'};
+  Object.entries(fields).forEach(([id, key]) => { if ($('#' + id)) d[key] = $('#' + id).value; });
+  const date = $('#fDate') && $('#fDate').value;
+  const time = $('#fTime') && $('#fTime').value;
+  d.deadline = date ? date + ' ' + (time || '23:59') : '';
+}
+
+let submitting = false;
 async function submitForm() {
+  if (submitting) return;
+  submitting = true;
+  try { await performSubmitForm(); } finally { submitting = false; }
+}
+
+async function performSubmitForm() {
   const f = S.form;
   const title = $('#fTitle').value.trim();
   if (!title) { toast('Название надо придумать 🙂'); haptic('rigid'); return; }
   let per = null, goal = null;
   if (f.chip === 'per') {
-    per = parseInt($('#fPer') ? $('#fPer').value : '', 10);
+    per = parseAmount($('#fPer') ? $('#fPer').value : '');
     if (!per || per <= 0) { toast('Сколько с каждого? Например: 400'); haptic('rigid'); return; }
   } else if (f.chip === 'sum') {
-    goal = parseInt($('#fGoal') ? $('#fGoal').value : '', 10);
+    goal = parseAmount($('#fGoal') ? $('#fGoal').value : '');
     if (!goal || goal <= 0) { toast('Сколько собираем всего? Например: 5000'); haptic('rigid'); return; }
   }
   const dy = $('#fDate') && $('#fDate').value ? $('#fDate').value : '';
   const dt = $('#fTime') && $('#fTime').value ? $('#fTime').value : '';
   /* отдаём время как ввёл юзер + его пояс (±HHMM) — иначе сервер путает ЧП/UTC и дедлайн уезжает */
   let deadline = '';
-  if (dy && dt) {
-    const off = -new Date().getTimezoneOffset();
+  if (dy) {
+    const selectedTime = dt || '23:59';
+    const off = -new Date(dy + 'T' + selectedTime).getTimezoneOffset();
     const sign = off >= 0 ? '+' : '-';
     const oh = String(Math.floor(Math.abs(off) / 60)).padStart(2, '0');
     const om = String(Math.abs(off) % 60).padStart(2, '0');
-    deadline = dy + ' ' + dt + ' ' + sign + oh + om;
+    deadline = dy + ' ' + selectedTime + ' ' + sign + oh + om;
   }
   const hint = $('#fHint') ? $('#fHint').value.trim() : '';
   const data = { title: title, per_person: per, goal_total: goal, deadline: deadline, pay_hint: hint };
@@ -757,6 +797,7 @@ document.addEventListener('click', async (ev) => {
   /* — форма (создать / изменить) — */
   const chipBtn = ev.target.closest('#fModeChips [data-chip]');
   if (chipBtn && S.form) {
+    captureForm();
     S.form.chip = chipBtn.dataset.chip;
     haptic();
     return renderForm();
@@ -947,7 +988,7 @@ function showIntro() {
     haptic();
     if (step < INTRO.length - 1) { step++; paint(); return; }
     el.remove();
-    localStorage.setItem('skinulis_intro_v2', '1');
+    try { localStorage.setItem('skinulis_intro_v2', '1'); } catch (_) {}
     S.introDone = true;
   };
   paint();

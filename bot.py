@@ -16,6 +16,8 @@
 """
 
 import hashlib
+import copy
+import functools
 import gzip
 import hmac
 import html
@@ -24,6 +26,7 @@ import logging
 import os
 import re
 import secrets
+import tempfile
 import threading
 import time
 import urllib.error
@@ -33,7 +36,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "data")
+DATA_DIR = os.environ.get("DATA_DIR", os.path.join(BASE_DIR, "data"))
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
 PUBLIC_DIR = os.path.join(BASE_DIR, "public")
 
@@ -52,6 +55,38 @@ STATE = {
     "hidden": {},       # "777" -> ["c_ab12", ...] — сборы, которые юзер убрал из своих (у других остаются)
 }
 LOCK = threading.RLock()
+_TRANSACTION = threading.local()
+
+
+def after_state(fn, *args, **kwargs):
+    """Send Telegram side effects after the outer state transaction releases LOCK."""
+    if getattr(_TRANSACTION, "depth", 0):
+        _TRANSACTION.jobs.append((fn, args, kwargs))
+        return None
+    return fn(*args, **kwargs)
+
+
+def state_locked(fn):
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        outer = not getattr(_TRANSACTION, "depth", 0)
+        if outer:
+            _TRANSACTION.jobs = []
+        with LOCK:
+            _TRANSACTION.depth = getattr(_TRANSACTION, "depth", 0) + 1
+            try:
+                result = fn(*args, **kwargs)
+            finally:
+                _TRANSACTION.depth -= 1
+        if outer:
+            jobs, _TRANSACTION.jobs = _TRANSACTION.jobs, []
+            for task, task_args, task_kwargs in jobs:
+                try:
+                    task(*task_args, **task_kwargs)
+                except Exception:
+                    log.exception("Telegram side effect failed")
+        return result
+    return wrapped
 # "chat_id:message_id" -> последний отправленный текст карточки (чтобы не гонять
 # холостые editMessageText, упирающиеся в 400 «message is not modified»)
 CARD_CACHE = {}
@@ -60,25 +95,41 @@ bot_username = os.environ.get("BOT_USERNAME", "")  # заполнится из g
 
 # ────────────────────────────────────────────────── состояние
 
+@state_locked
 def load_state():
     os.makedirs(DATA_DIR, exist_ok=True)
     if os.path.exists(STATE_PATH):
         try:
             with open(STATE_PATH, encoding="utf-8") as f:
                 disk = json.load(f)
-            for k in STATE:
-                STATE[k].update(disk.get(k, {}))
-        except Exception as e:
-            log.warning("state.json повреждён (%s) — начинаю с чистого", e)
+            if not isinstance(disk, dict) or any(not isinstance(v, dict) for v in disk.values()):
+                raise ValueError("state sections must be objects")
+            # Validate everything before changing memory. Never overwrite damaged financial data.
+            for cid, c in disk.get("collections", {}).items():
+                if not isinstance(c, dict) or c.get("id") != cid:
+                    raise ValueError("invalid collection")
+            STATE.update(disk)
+        except (OSError, ValueError, TypeError) as e:
+            raise RuntimeError("state.json повреждён; восстановите из резервной копии") from e
     if DEV_MODE and not STATE["collections"]:
         seed_demo()
 
 
+@state_locked
 def save_state():
-    tmp = STATE_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(STATE, f, ensure_ascii=False, indent=1)
-    os.replace(tmp, STATE_PATH)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=DATA_DIR,
+                                         prefix="state-", suffix=".tmp", delete=False) as f:
+            tmp = f.name
+            json.dump(STATE, f, ensure_ascii=False, indent=1, allow_nan=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, STATE_PATH)
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 def uid(u):
@@ -90,6 +141,7 @@ def nice_name(u):
     return n or (u or {}).get("username") or ("Без имени " + str((u or {}).get("id", "")))
 
 
+@state_locked
 def upsert_user(u):
     if not u or not u.get("id"):
         return
@@ -105,6 +157,8 @@ def save():
 
 def tg(method, **params):
     """Bot API POST. Возвращает result | None (всё молча в лог)."""
+    if method in ("sendMessage", "answerCallbackQuery", "editMessageText", "deleteMessage") and getattr(_TRANSACTION, "depth", 0):
+        return after_state(tg, method, **params)
     if not BOT_TOKEN:
         return None
     if os.environ.get("BOT_OFFLINE", "") == "1":  # тестовый режим без сети Telegram
@@ -168,82 +222,37 @@ def _dbg_initdata(lines):
 
 
 def validate_init_data(init_data, reason=None):
-    """Подпись Telegram. Клиенты и версии API считают data_check_string по-разному
-    (включают/исключают signature, сырые/декодированные значения) — пробуем ВСЕ
-    варианты, и какой сошёлся, тот и правда. Диагностика — в data/debug_initdata.log."""
-    if not init_data:
-        if reason is not None:
-            reason["r"] = "пусто"
-        return None
-
-    secret = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
-
-    raw_pairs = [tuple(x.split("=", 1)) for x in init_data.split("&") if "=" in x]
+    """Validate decoded Telegram HMAC fields and a bounded authentication date."""
     try:
-        dec_pairs = urllib.parse.parse_qsl(init_data, keep_blank_values=True)
-    except Exception:
-        dec_pairs = []
-    forms = []
-    for plabel, pairs in (("raw", raw_pairs), ("dec", dec_pairs)):
-        if not pairs:
-            continue
-        for excl_sig in (True, False):
-            forms.append((plabel + ("-искл" if excl_sig else "-вкл"), pairs, excl_sig))
-
-    dbg = []
-    result = None
-    ok_form = None
-    for name, pairs, excl_sig in forms:
-        d = {}
-        hash_ = None
-        for k, v in pairs:
-            if k == "hash":
-                hash_ = v
-                continue
-            if k == "signature" and excl_sig:
-                continue
-            d[k] = v
-        if not hash_:
-            dbg.append("%s: нет hash" % name)
-            continue
-        dcs = "\n".join("%s=%s" % (k, v) for k, v in sorted(d.items()))
-        calc = hmac.new(secret, dcs.encode(), hashlib.sha256).hexdigest()
-        if hmac.compare_digest(calc, hash_):
-            auth_date = int(d.get("auth_date", "0") or 0)
-            if auth_date and time.time() - auth_date > 86400 * 3:
-                dbg.append("%s: ХОРОШАЯ подпись, но протух auth_date" % name)
-                continue
-            uj = d.get("user", "")
-            for cand in (uj, urllib.parse.unquote(uj)):  # user — url-encoded JSON (или уже декодированный)
-                try:
-                    u = json.loads(cand)
-                    if isinstance(u, dict) and u.get("id"):
-                        result = u
-                        ok_form = name
-                        break
-                except Exception:
-                    continue
-            if result:
-                dbg.append("%s: ПОДПИСЬ ОК, user=%s" % (name, (result.get("first_name") or "?")))
-                break
-            dbg.append("%s: подпись ОК, но user не распарсился (%s)" % (name, uj[:60]))
-        else:
-            dbg.append("%s: HMAC нет got=%s calc=%s" % (name, hash_[:16], calc[:16]))
-
-    # сырой dcs для оффлайн-анализа, если ни один вариант не сошёлся
-    if not result and raw_pairs:
-        dcs_all = "\n".join("%s=%s" % (k, v) for k, v in sorted(raw_pairs) if k not in ("hash",))
-        dbg.append("dcs(искл hash): " + dcs_all[:900])
-
-    if reason is not None:
-        reason["r"] = ("ОК " + ok_form) if result else "; ".join(dbg)[:1500]
-        reason["keys"] = ",".join(sorted(k for k, _ in raw_pairs))[:200]
-    if result:
-        _dbg_initdata(["ПОДХОД: форма=%s user=%s" % (ok_form, result.get("id"))])
-    else:
-        _dbg_initdata(["ОТКАЗ: %s" % "; ".join(dbg)])
-    return result if isinstance(result, dict) else None
-
+        if not BOT_TOKEN or not isinstance(init_data, str) or len(init_data) > 16384:
+            raise ValueError("invalid initData")
+        pairs = urllib.parse.parse_qsl(init_data, keep_blank_values=True, strict_parsing=True)
+        d = dict(pairs)
+        if len(d) != len(pairs):
+            raise ValueError("duplicate fields")
+        received = d.pop("hash", "")
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", received):
+            raise ValueError("invalid hash")
+        secret = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
+        # HMAC includes signature on current clients; keep compatibility with earlier clients.
+        variants = [d, {k: v for k, v in d.items() if k != "signature"}]
+        if not any(hmac.compare_digest(
+                hmac.new(secret, "\n".join("%s=%s" % item for item in sorted(fields.items())).encode(),
+                         hashlib.sha256).hexdigest(), received.lower()) for fields in variants):
+            raise ValueError("invalid signature")
+        stamp = int(d.get("auth_date", "0"))
+        if stamp <= 0 or not -60 <= time.time() - stamp <= 86400:
+            raise ValueError("expired or future auth_date")
+        u = json.loads(d.get("user", ""))
+        if not isinstance(u, dict) or type(u.get("id")) is not int or u["id"] <= 0:
+            raise ValueError("invalid user")
+        if any(k in u and not isinstance(u[k], str) for k in ("first_name", "last_name", "username")):
+            raise ValueError("invalid user fields")
+        return u
+    except (ValueError, TypeError, OverflowError):
+        if reason is not None:
+            reason["r"] = "invalid or expired Telegram initData"
+        return None
 
 # ────────────────────────────────────────────────── разбор /skor
 
@@ -274,7 +283,7 @@ def parse_skor(args):
                     o["cur"] = mval.group(2)
                 i += 2
                 continue
-            if mdate:
+            if mdate and low == "до":
                 day, mon = int(mdate.group(1)), int(mdate.group(2))
                 year = mdate.group(3)
                 hh, mm = 23, 59
@@ -295,9 +304,15 @@ def parse_skor(args):
                         dt = dt.replace(year=y + 1)
                     o["until"] = dt.strftime("%Y-%m-%d %H:%M")
                 except ValueError:
-                    pass
+                    o["error"] = "Дедлайн сломался, попробуй ещё раз"
                 i = j
                 continue
+            if low == "до":
+                o["error"] = "Дедлайн: например до 28.12 20:00"
+            else:
+                o["error"] = "Сумма — целое положительное число"
+        elif low in ("по", "на", "до"):
+            o["error"] = "После «%s» нужно значение" % low
         if low.startswith("анон"):
             o["anon"] = True
             i += 1
@@ -310,7 +325,7 @@ def parse_skor(args):
 # ────────────────────────────────────────────────── модель
 
 def new_id():
-    return "c_" + secrets.token_hex(4)
+    return "c_" + secrets.token_hex(16)
 
 
 def get_collection(cid):
@@ -345,7 +360,15 @@ def unpaid_codes(cid):
     return [m for m in members_of(cid) if m not in paid and m not in declined]
 
 
+@state_locked
 def create_collection(title, chat_id, created_by, per=None, goal=None, until=None, anon=False, cur="₽"):
+    if not isinstance(title, str) or not title.strip() or len(title) > 64:
+        raise ValueError("Название должно содержать от 1 до 64 символов")
+    if any(isinstance(valid_amount(v), str) for v in (per, goal)) or (per and goal):
+        raise ValueError("Укажи одну корректную сумму: с каждого или общую")
+    if valid_deadline(until) == "bad_date":
+        raise ValueError("Дедлайн сломался, попробуй ещё раз")
+    per, goal = valid_amount(per), valid_amount(goal)
     c = {
         "id": new_id(),
         "title": title or "Сбор",
@@ -443,7 +466,8 @@ def card_html(cid):
             mark = "✅"
         else:
             mark = "⭕"
-        names.append(mark + " " + html.escape(user_of(code)["name"]))
+        name = "Участник %d" % (len(names) + 1) if c["anonymous"] else user_of(code)["name"]
+        names.append(mark + " " + html.escape(name))
     if names:
         who = ", ".join(names[:10])
         if len(names) > 10:
@@ -491,18 +515,21 @@ def card_keyboard(cid):
 
 
 def update_card(cid):
+    return after_state(_update_card, cid)
+
+
+def _update_card(cid):
     """Обновить карточку во всех чатах, где она показана (или создать в основном)."""
-    c = STATE["collections"].get(cid)
-    if not c or not BOT_TOKEN:
-        return
-    cards = c.setdefault("cards", {})
-    if not cards and c.get("chat_id"):
-        if c.get("message_id"):
-            cards[str(c["chat_id"])] = c["message_id"]
-        else:
-            cards[str(c["chat_id"])] = None
-    for chat_id, mid in list(cards.items()):
-        text = card_html(cid)
+    with LOCK:
+        c = STATE["collections"].get(cid)
+        if not c or not BOT_TOKEN:
+            return
+        cards = c.setdefault("cards", {})
+        if not cards and c.get("chat_id"):
+            cards[str(c["chat_id"])] = c.get("message_id")
+        targets = list(cards.items())
+        text, keyboard = card_html(cid), card_keyboard(cid)
+    for chat_id, mid in targets:
         key = "%s:%s" % (chat_id, mid)
         if mid:
             # Telegram оозвращает 400 «not modified», если править тем же текстом —
@@ -512,50 +539,62 @@ def update_card(cid):
             try:
                 ok = tg("editMessageText", chat_id=int(chat_id), message_id=mid,
                         text=text, parse_mode="HTML",
-                        reply_markup=card_keyboard(cid), disable_web_page_preview=True)
+                        reply_markup=keyboard, disable_web_page_preview=True)
                 if ok:
                     CARD_CACHE[key] = text
                     continue
             except Exception:
                 pass
+            # A failed edit may be a transient network/Telegram error. Do not create duplicates.
+            continue
         sent = tg("sendMessage", chat_id=int(chat_id), text=text,
-                  parse_mode="HTML", reply_markup=card_keyboard(cid),
+                  parse_mode="HTML", reply_markup=keyboard,
                   disable_web_page_preview=True)
         if sent:
-            cards[chat_id] = sent["message_id"]
-            CARD_CACHE["%s:%s" % (chat_id, sent["message_id"])] = text
-            save_state()
+            with LOCK:
+                if get_collection(cid) is c:
+                    cards[chat_id] = sent["message_id"]
+                    CARD_CACHE["%s:%s" % (chat_id, sent["message_id"])] = text
+                    save_state()
         elif chat_id != str(c.get("chat_id")):
             cards.pop(chat_id, None)
 
 
 def post_card(cid, chat_id):
+    return after_state(_post_card, cid, chat_id)
+
+
+def _post_card(cid, chat_id):
     """Выложить карточку сбора в конкретный чат (когда юзер пришёл по /start <код>)."""
-    c = STATE["collections"].get(cid)
-    if not c:
-        return False
-    cards = c.setdefault("cards", {})
+    with LOCK:
+        c = STATE["collections"].get(cid)
+        if not c:
+            return False
+        cards = c.setdefault("cards", {})
+        text, keyboard = card_html(cid), card_keyboard(cid)
     if str(chat_id) in cards and cards[str(chat_id)]:
         try:
             old = int(cards[str(chat_id)])
-            text = card_html(cid)
             key = "%s:%s" % (chat_id, old)
             if CARD_CACHE.get(key) == text:
                 return True
-            tg("editMessageText", chat_id=int(chat_id), message_id=old,
+            ok = tg("editMessageText", chat_id=int(chat_id), message_id=old,
                text=text, parse_mode="HTML",
-               reply_markup=card_keyboard(cid), disable_web_page_preview=True)
-            CARD_CACHE[key] = text
-            return True
+               reply_markup=keyboard, disable_web_page_preview=True)
+            if ok:
+                CARD_CACHE[key] = text
+            return bool(ok)
         except Exception:
             pass
-    sent = tg("sendMessage", chat_id=int(chat_id), text=card_html(cid),
-              parse_mode="HTML", reply_markup=card_keyboard(cid),
+    sent = tg("sendMessage", chat_id=int(chat_id), text=text,
+              parse_mode="HTML", reply_markup=keyboard,
               disable_web_page_preview=True)
     if sent:
-        cards[str(chat_id)] = sent["message_id"]
-        CARD_CACHE["%s:%s" % (chat_id, sent["message_id"])] = card_html(cid)
-        save_state()
+        with LOCK:
+            if get_collection(cid) is c:
+                cards[str(chat_id)] = sent["message_id"]
+                CARD_CACHE["%s:%s" % (chat_id, sent["message_id"])] = text
+                save_state()
     return True
 
 
@@ -584,20 +623,17 @@ def chat_paid(cid, user, amount=None):
                 return "Галочку снял 🔄", None
             # total/free: уже скинулся — досыпание; честно говорим, сколько есть,
             # и что сумму на довнесение можно просто написать числом в чат
-            STATE.setdefault("pendings", {})[code] = {"cid": cid, "ts": time.time()}
+            STATE.setdefault("pendings", {})[code] = {"cid": cid, "chat": user["id"], "ts": time.time()}
             save_state()
             return "paid-again", None
         if amount is None and c["mode"] == "per_person" and c["per_person"]:
             amount = c["per_person"]
         if amount is None:
-            STATE.setdefault("pendings", {})[code] = {"cid": cid, "ts": time.time()}
+            STATE.setdefault("pendings", {})[code] = {"cid": cid, "chat": user["id"], "ts": time.time()}
             save_state()
             return "png-amount", None  # спросим сумму текстом
-        try:
-            amount = int(amount)
-        except (TypeError, ValueError):
-            return None, "Странная сумма"
-        if amount <= 0 or amount > 10_000_000:
+        amount = valid_amount(amount)
+        if amount is None or isinstance(amount, str):
             return None, "Странная сумма"
         if code not in c["joined"]:
             c["joined"].append(code)
@@ -612,7 +648,7 @@ def chat_paid(cid, user, amount=None):
 
 def chat_finalize_check(amount_msg, user_code, cid):
     """Проверка: платежи есть и все не-отказники скинулись → close."""
-    return finalize(amount_msg)
+    return finalize(cid)
 
 
 def chat_decline(cid, user):
@@ -644,6 +680,7 @@ def chat_decline(cid, user):
     return "Отметил тебя как отказника 🙅", None
 
 
+@state_locked
 def handle_callback(upd):
     cq = upd.get("callback_query")
     if not cq:
@@ -679,6 +716,10 @@ def handle_callback(upd):
     if act in ("p", "d", "j") and chat_id:
         if act == "p":
             text, err = chat_paid(cid, cq["from"])
+            pending = STATE.get("pendings", {}).get(code)
+            if pending and pending.get("cid") == cid:
+                pending["chat"] = chat_id
+                save_state()
             if text == "png-amount":
                 tg("answerCallbackQuery", callback_query_id=cq["id"],
                    text="Напиши сумму в поле ввода этого чата ⌨️ — например «350» — и я отмечу её в сборе",
@@ -735,6 +776,7 @@ def handle_callback(upd):
 
 # ────────────────────────────────────────────────── веб-вью (для приложения бота)
 
+@state_locked
 def build_view(cid, me_code):
     c = STATE["collections"].get(cid)
     if not c:
@@ -755,8 +797,11 @@ def build_view(cid, me_code):
             if p:
                 row["amount"] = p["amount"]
         else:
-            row["name"] = u["name"]
-            row["username"] = u["username"]
+            private = c["anonymous"] and me_code != c["created_by"]
+            row["name"] = "Участник %d" % (len(roster) + 1) if private else u["name"]
+            row["username"] = "" if private else u["username"]
+            if private:
+                row["id"] = "anonymous_%d" % len(roster)
             if p:
                 row["amount"] = p["amount"]
         roster.append(row)
@@ -818,10 +863,10 @@ def my_items(me_code):
 def build_stats():
     """Сводка для владельца: пользователи, сборы, оплаты, активность."""
     with LOCK:
-        users = dict(STATE.get("users") or {})
-        collections = dict(STATE.get("collections") or {})
-        payments = dict(STATE.get("payments") or {})
-        hidden = dict(STATE.get("hidden") or {})
+        users = copy.deepcopy(STATE.get("users") or {})
+        collections = copy.deepcopy(STATE.get("collections") or {})
+        payments = copy.deepcopy(STATE.get("payments") or {})
+        hidden = copy.deepcopy(STATE.get("hidden") or {})
     test_ids = TEST_USER_IDS
     real_users = {uid: u for uid, u in users.items() if uid not in test_ids and not str(uid).startswith("900")}
     active = [c for c in collections.values() if c.get("status") == "active"]
@@ -921,24 +966,36 @@ def delete_collection(cid, by=None):
                 ids.remove(cid)
         for k in [k for k in STATE["nags"] if k.startswith(cid + ":")]:
             STATE["nags"].pop(k, None)
+        for code, pending in list(STATE.get("pendings", {}).items()):
+            if pending.get("cid") == cid:
+                STATE["pendings"].pop(code, None)
         save_state()
-    if chat_id and message_id and BOT_TOKEN:
-        # телега не отдаёт deleteMessage для сообщений старше 48ч — тогда перепишем
-        if not tg("deleteMessage", chat_id=chat_id, message_id=message_id):
-            tg("editMessageText", chat_id=chat_id, message_id=message_id,
-               text="%s — 🗑 сбор удалён организатором" % html.escape(title),
-               parse_mode="HTML", disable_web_page_preview=True)
+    cards = dict(c.get("cards") or {})
+    if chat_id and message_id:
+        cards.setdefault(str(chat_id), message_id)
+    after_state(delete_cards, cards, title)
     return None
+
+
+def delete_cards(cards, title):
+    for card_chat, mid in cards.items():
+        if not mid or not BOT_TOKEN:
+            continue
+        # телега не отдаёт deleteMessage для сообщений старше 48ч — тогда перепишем
+        if not tg("deleteMessage", chat_id=int(card_chat), message_id=mid):
+            tg("editMessageText", chat_id=int(card_chat), message_id=mid,
+               text="%s — 🗑 сбор удалён организатором" % html.escape(title),
+               parse_mode="HTML", reply_markup={"inline_keyboard": []}, disable_web_page_preview=True)
+        CARD_CACHE.pop("%s:%s" % (card_chat, mid), None)
 
 
 def valid_amount(v):
     """int > 0 или None -> None; мусор -> строка ошибки."""
-    if v in (None, ""):
+    if v is None or v == "":
         return None
-    try:
-        v = int(v)
-    except (TypeError, ValueError):
+    if type(v) is not int and not (isinstance(v, str) and re.fullmatch(r"[0-9]{1,8}", v)):
         return "Сумма — просто число, например 400"
+    v = int(v)
     if v <= 0 or v > 10_000_000:
         return "Странная сумма"
     return v
@@ -946,9 +1003,11 @@ def valid_amount(v):
 
 def valid_deadline(v):
     """Дедлайн «YYYY-MM-DD HH:MM» (можно с «±HHMM» — локальная зона юзера) или None/bad_date."""
-    if not v:
+    if v is None or v == "":
         return None
-    v = str(v).strip()
+    if not isinstance(v, str):
+        return "bad_date"
+    v = v.strip()
     if len(v) > 16:
         try:
             datetime.strptime(v, "%Y-%m-%d %H:%M %z")
@@ -965,18 +1024,25 @@ def valid_deadline(v):
 # ────────────────────────────────────────────────── напоминания (бывают и без дедлайна)
 
 def nag(cid, code, stage, text):
+    return after_state(_nag, cid, code, stage, text)
+
+
+def _nag(cid, code, stage, text):
     key = "%s:%s:%s" % (cid, code, stage)
     with LOCK:
         if key in STATE["nags"]:
             return
-        STATE["nags"][key] = time.time()
-    save_state()
     if BOT_TOKEN:
-        tg("sendMessage", chat_id=int(code), text=text,
+        sent = tg("sendMessage", chat_id=int(code), text=text,
            reply_markup={"inline_keyboard": [[{"text": "💸 Открыть сбор", "url": deep_link(cid)}]]},
            disable_web_page_preview=True)
+        if not sent:
+            return
     else:
         log.info("[демо] не отправляю юзеру %s: %s", code, text[:60])
+    with LOCK:
+        STATE["nags"][key] = time.time()
+        save_state()
 
 
 def scheduler_loop():
@@ -992,6 +1058,7 @@ def scheduler_loop():
             time.sleep(60)
 
 
+@state_locked
 def tick_collection(cid):
     with LOCK:
         c = get_collection(cid)
@@ -1076,9 +1143,11 @@ def final_text(cid, c, n_paid, total, missed):
     title = html.escape(c["title"])
     # missed может прийти кодами — переводим в имена
     missed = [user_of(x)["name"] if str(x).isdigit() else str(x) for x in missed]
+    if c["anonymous"]:
+        missed = ["участников: %d" % len(missed)] if missed else []
     paid_names = []
     for code, p in sorted(payments_of(cid).items(), key=lambda kv: kv[1]["paid_ts"]):
-        nm = user_of(code)["name"]
+        nm = "Участник %d" % (len(paid_names) + 1) if c["anonymous"] else user_of(code)["name"]
         paid_names.append("%s — %s" % (html.escape(nm), money(p["amount"], c["currency"])))
     if missed:
         text = ("🏁 <b>«%s» — итог</b>\n💰 Собрано %s от %d %s" % (
@@ -1107,7 +1176,7 @@ def finalize(cid):
                 return  # план не набран — сбор живёт, даже если все отметились
         elif unpaid_codes(cid):
             return  # остались должники — живём
-    close_collection(cid, auto=True)
+        close_collection(cid, auto=True)
 
 
 # ────────────────────────────────────────────────── команды бота
@@ -1222,6 +1291,7 @@ def send_how_manual(chat_id):
        parse_mode="HTML", disable_web_page_preview=True)
 
 
+@state_locked
 def handle_amount_text(msg, text):
     """Юзер написал боту без команды: кнопки внизу, сумма (если мы её ждали) или подсказка."""
     user_code = uid(msg["from"])
@@ -1255,39 +1325,35 @@ def handle_amount_text(msg, text):
         fa({"from": msg["from"], "chat": msg["chat"]}, "")
         return
     p = (STATE.get("pendings") or {}).get(user_code)
+    if p and p.get("chat") != chat_id:
+        return  # A number in another chat must never pay for or delete this collection.
     if p and p.get("del") and time.time() - p.get("ts", 0) < 7200:
-        STATE["pendings"].pop(user_code, None)
-        save_state()
         nums = parse_nums(text)
         if nums is None:
             tg("sendMessage", chat_id=chat_id,
                text="Напиши номера через запятую — например «1, 2» 🙂", disable_web_page_preview=True)
             return
-        delete_pick(msg["chat"], user_code, deletables(msg["chat"], user_code), nums)
+        snapshot = [STATE["collections"].get(cid) for cid in p.get("ids", [])]
+        if not snapshot or any(c is None for c in snapshot):
+            tg("sendMessage", chat_id=chat_id, text="Список изменился — открой /delete заново")
+            return
+        STATE["pendings"].pop(user_code, None)
+        save_state()
+        delete_pick(msg["chat"], user_code, snapshot, nums)
         return
     if p and time.time() - p.get("ts", 0) < 7200:
         cid = p.get("cid")
         c = STATE["collections"].get(cid)
-        if not c or c["status"] != "active":
+        if not c or c["status"] != "active" or user_code in c.get("left", []):
             STATE["pendings"].pop(user_code, None)
             save_state()
             return
-        m = re.search(r"\d[\d\s.,]{0,10}", text)
-        if not m:
+        amount = valid_amount(re.sub(r"[ \u00a0\u202f]", "", text.strip()))
+        if amount is None or isinstance(amount, str):
             tg("sendMessage", chat_id=chat_id,
                text="Не понял 🙂 Напиши сумму просто числом — например «350», и я отмечу галочку.",
                disable_web_page_preview=True)
             return
-        try:
-            amount = int(re.sub(r"[^\d]", "", m.group(0))[:9])
-        except ValueError:
-            amount = 0
-        if amount <= 0 or amount > 10_000_000:
-            tg("sendMessage", chat_id=chat_id,
-               text="Такое вряд ли было 🙂 Напиши сумму числом, например «350».",
-               disable_web_page_preview=True)
-            return
-        STATE["pendings"].pop(user_code, None)
         code = str(msg["from"]["id"])
         with LOCK:
             c = STATE["collections"][cid]
@@ -1296,6 +1362,10 @@ def handle_amount_text(msg, text):
             # total/free: повторная сумма — это довнесение, складываем
             if prev and c["mode"] != "per_person":
                 amount += int(prev.get("amount") or 0)
+            if isinstance(valid_amount(amount), str):
+                tg("sendMessage", chat_id=chat_id, text="Общая сумма слишком большая")
+                return
+            STATE["pendings"].pop(user_code, None)
             paid[code] = {"amount": amount, "paid_ts": time.time()}
             if code not in c["joined"]:
                 c["joined"].append(code)
@@ -1321,11 +1391,18 @@ def handle_amount_text(msg, text):
 def cmd_skor(msg, args):
     chat = msg["chat"]
     title, o = parse_skor(args)
+    if not args.strip():
+        return send_create_manual(chat["id"])
+    if o.get("error"):
+        return tg("sendMessage", chat_id=chat["id"], text=o["error"])
     with LOCK:
-        c = create_collection(
-            title=title, chat_id=chat["id"], created_by=uid(msg["from"]),
-            per=o["per"], goal=o["goal"], until=o["until"], anon=False, cur=o["cur"],
-        )
+        try:
+            c = create_collection(
+                title=title, chat_id=chat["id"], created_by=uid(msg["from"]),
+                per=o["per"], goal=o["goal"], until=o["until"], anon=o["anon"], cur=o["cur"],
+            )
+        except ValueError as e:
+            return tg("sendMessage", chat_id=chat["id"], text=str(e))
         cid = c["id"]
     update_card(cid)
 
@@ -1422,7 +1499,8 @@ def cmd_delete(msg, args):
             else:
                 lines.append("%d) 💸 %s" % (i, html.escape(c["title"])))
         # ждём ответ «1,2» текстом без префикса тоже
-        STATE.setdefault("pendings", {})[who] = {"del": True, "chat": chat["id"], "ts": time.time()}
+        STATE.setdefault("pendings", {})[who] = {"del": True, "chat": chat["id"],
+                                                "ids": [c["id"] for c in mine], "ts": time.time()}
         save_state()
         tg("sendMessage", chat_id=chat["id"], text="\n".join(lines), parse_mode="HTML",
            disable_web_page_preview=True)
@@ -1474,17 +1552,21 @@ def collections_of(chat, who):
 
 def parse_num(s):
     try:
-        return max(1, int(s.strip()))
+        return int(s.strip())
     except (ValueError, AttributeError):
         return None
 
 
 def parse_nums(s, cap=20):
     """«1,2» / «1 2» / «1 и 2» -> [1, 2]; без цифр -> None. До cap номеров."""
-    nums = [int(x) for x in re.findall(r"\d+", s or "")]
+    if not isinstance(s, str) or not re.fullmatch(r"\s*[0-9]{1,6}(?:[\s,и]+[0-9]{1,6})*\s*", s):
+        return None
+    nums = [int(x) for x in re.findall(r"\d+", s)]
     if not nums:
         return None
-    nums = sorted(set(n for n in nums if n >= 1))[:cap]
+    if any(n < 1 for n in nums) or len(nums) > cap:
+        return None
+    nums = sorted(set(nums))
     return nums or None
 
 
@@ -1513,6 +1595,7 @@ def delete_pick(chat, who, mine, nums):
        disable_web_page_preview=True)
 
 
+@state_locked
 def handle_update(upd):
     if "callback_query" in upd:
         handle_callback(upd)
@@ -1526,11 +1609,14 @@ def handle_update(upd):
     text = (msg.get("text") or "").strip()
     if not text.startswith("/"):
         # приложение бота работает в своём окне — лично боту пишут только для сумм
-        if chat_type == "private" and text:
+        if text and (chat_type == "private" or
+                     STATE.get("pendings", {}).get(uid(msg["from"]), {}).get("chat") == msg["chat"]["id"]):
             handle_amount_text(msg, text)
         return
     parts = text.split(" ", 1)
     cmd = parts[0].lower().split("@")[0]
+    if "@" in parts[0] and parts[0].split("@", 1)[1].lower() != bot_username.lower():
+        return
     rest = parts[1] if len(parts) > 1 else ""
     if cmd == "/start":
         cmd_start(msg, rest.strip())
@@ -1558,8 +1644,17 @@ def handle_update(upd):
 # ────────────────────────────────────────────────── HTTP сервер
 
 
+class HTTPServer(ThreadingHTTPServer):
+    request_queue_size = 64
+    daemon_threads = True
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "SkinulisBot/0.1"
+
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(10)
 
     # ---------- helpers
 
@@ -1579,11 +1674,13 @@ class Handler(BaseHTTPRequestHandler):
             u = validate_init_data(hdr[4:] if hdr.startswith("tma ") else hdr, rd)
             if u:
                 with LOCK:
+                    previous = STATE["users"].get(uid(u))
                     upsert_user(u)
-                    save_state()
+                    if previous != STATE["users"].get(uid(u)):
+                        save_state()
                 return u
             if not DEV_MODE:
-                log.warning("initData отклонён: заголовок=%dб причина=%s (полная диагностика: cat data/debug_initdata.log)",
+                log.warning("initData отклонён: заголовок=%dб причина=%s",
                             len(hdr), str(rd.get("r"))[:600])
         if DEV_MODE:
             with LOCK:
@@ -1593,11 +1690,22 @@ class Handler(BaseHTTPRequestHandler):
     def read_json(self):
         try:
             n = int(self.headers.get("Content-Length", "0") or 0)
-            if n <= 0 or n > 65536:
-                return {}
-            return json.loads(self.rfile.read(n).decode() or "{}")
-        except Exception:
-            return {}
+            if n < 0 or n > 65536:
+                raise ValueError("invalid body length")
+            data = self.rfile.read(n)
+            if len(data) != n:
+                raise ValueError("incomplete body")
+            def reject_constant(value):
+                raise ValueError("invalid JSON number: " + value)
+            obj = json.loads(data.decode() or "{}", parse_constant=reject_constant)
+            if not isinstance(obj, dict):
+                raise ValueError("JSON object required")
+            for key in ("title", "pay_hint", "deadline", "hint", "start_param"):
+                if key in obj and obj[key] is not None and not isinstance(obj[key], str):
+                    raise ValueError("%s must be a string" % key)
+            return obj
+        except (ValueError, UnicodeError, TimeoutError) as e:
+            raise ValueError("Некорректный JSON-запрос") from e
 
     # ---------- static
 
@@ -1736,29 +1844,24 @@ class Handler(BaseHTTPRequestHandler):
     # ---------- API
 
     def do_POST(self):
+        try:
+            body = self.read_json()
+        except ValueError as e:
+            self.close_connection = True
+            return self.send_json({"error": str(e)}, 400)
+        return self.post_json(body)
+
+    @state_locked
+    def post_json(self, body):
         path = self.path.split("?")[0]
-        body = self.read_json()
         # диагностика клиентов без initData (App Store / Web): что именно пришло в URL и есть ли мост
         if path == "/api/clientdiag":
-            try:
-                rec = {k: str(body.get(k) or "")[:300] for k in
-                       ("ua", "platform", "hashKeys", "hasTelegram", "startParam", "href")}
-                with open(os.path.join(DATA_DIR, "debug_client.log"), "a", encoding="utf-8") as f:
-                    f.write("[%s] %s\n" % (time.strftime("%d.%m %H:%M:%S"), json.dumps(rec, ensure_ascii=False)))
-            except Exception:
-                pass
+            # No unauthenticated disk writes or storage of launch URLs/credentials.
             return self.send_json({"ok": True})
         # «визитка»: один пинг на загрузку страницы (без auth). Показывает, что
         # страница вообще дошла до клиента, в каком окружении и на каком этапе
         # умерла, если JS упал (stage=load/appjs/js-error).
         if path == "/api/visit":
-            try:
-                rec = {k: str(body.get(k) or "")[:300] for k in
-                       ("stage", "msg", "ua", "href", "hash", "hasTG", "vw", "vh")}
-                with open(os.path.join(DATA_DIR, "debug_visits.log"), "a", encoding="utf-8") as f:
-                    f.write("[%s] %s\n" % (time.strftime("%d.%m %H:%M:%S"), json.dumps(rec, ensure_ascii=False)))
-            except Exception:
-                pass
             return self.send_json({"ok": True})
         me = self.authorize()
         if not me:
@@ -1793,6 +1896,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": per}, 400)
             if isinstance(goal, str):
                 return self.send_json({"error": goal}, 400)
+            if per and goal:
+                return self.send_json({"error": "Выбери один режим сбора"}, 400)
             until = valid_deadline((body.get("deadline") or "").strip())
             if until == "bad_date":
                 return self.send_json({"error": "Дедлайн сломался, попробуй ещё раз"}, 400)
@@ -1818,17 +1923,20 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 if c["status"] != "active":
                     return self.send_json({"error": "Сбор закрыт"}, 409)
+                if code in c.get("left", []):
+                    return self.send_json({"error": "Сначала вернись в сбор: «В деле»"}, 409)
                 if amount is None and c["mode"] == "per_person" and c["per_person"]:
                     amount = c["per_person"]
-                try:
-                    amount = int(amount)
-                except (TypeError, ValueError):
-                    return self.send_json({"error": "Сколько?"}, 400)
-                if amount <= 0 or amount > 10_000_000:
+                amount = valid_amount(amount)
+                if amount is None or isinstance(amount, str):
                     return self.send_json({"error": "Странная сумма"}, 400)
+                if c["mode"] == "per_person" and amount != c["per_person"]:
+                    return self.send_json({"error": "Сумма должна совпадать со взносом"}, 400)
                 if code not in c["joined"]:
                     c["joined"].append(code)
                 payments_of(cid)[code] = {"amount": amount, "paid_ts": time.time()}
+                if code in c.get("declined", []):
+                    c["declined"].remove(code)
                 save_state()
             update_card(cid)
             finalize(cid)
@@ -1890,7 +1998,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": "только организатор"}, 403)
             if c["status"] != "active":
                 return self.send_json({"error": "Сбор закрыт — создание новенького решит всё"}, 409)
+            original = c
+            c = copy.deepcopy(c)
             title = (body.get("title") or "").strip()
+            if "title" in body and not title:
+                return self.send_json({"error": "Название надо придумать"}, 400)
             if title:
                 if len(title) > 64:
                     return self.send_json({"error": "Название длинновато — до 64 символов"}, 400)
@@ -1910,6 +2022,8 @@ class Handler(BaseHTTPRequestHandler):
                 if "per_person" not in body and goal:
                     c["per_person"] = None
             c["mode"] = "per_person" if c["per_person"] else ("total" if c["goal_total"] else "free")
+            if c["per_person"] and c["goal_total"]:
+                return self.send_json({"error": "Выбери один режим сбора"}, 400)
             if "deadline" in body:
                 until = valid_deadline((body.get("deadline") or "").strip())
                 if until == "bad_date":
@@ -1918,8 +2032,10 @@ class Handler(BaseHTTPRequestHandler):
             if "pay_hint" in body:
                 c["pay_hint"] = (body.get("pay_hint") or "")[:200]
             with LOCK:
+                original.update(c)
                 save_state()
             update_card(cid)
+            finalize(cid)
             return self.send_json({"view": build_view(cid, code)})
 
         if action == "join":
@@ -1934,7 +2050,7 @@ class Handler(BaseHTTPRequestHandler):
                     save_state()
                 if code not in c["joined"]:
                     c["joined"].append(code)
-                    save_state()
+                save_state()
             update_card(cid)
             return self.send_json({"view": build_view(cid, code)})
 
@@ -1946,35 +2062,18 @@ class Handler(BaseHTTPRequestHandler):
             if code in payments_of(cid):
                 return self.send_json({"error": "Ты уже скинулся — сначала убери галочку ↩️"}, 409)
             with LOCK:
+                if code not in c["joined"]:
+                    c["joined"].append(code)
                 dec = c.setdefault("declined", [])
                 if code not in dec:
                     dec.append(code)
-                    save_state()
+                save_state()
             update_card(cid)
             finalize(cid)
             return self.send_json({"view": build_view(cid, code)})
 
         if action == "add":
-            if code != c["created_by"]:
-                return self.send_json({"error": "только организатор"}, 403)
-            if c["status"] != "active":
-                return self.send_json({"error": "Сбор закрыт"}, 409)
-            codes = body.get("codes") or []
-            if not isinstance(codes, list):
-                return self.send_json({"error": "codes должен быть списком"}, 400)
-            with LOCK:
-                added = 0
-                for ucode in codes[:20]:
-                    ucode = str(ucode)
-                    if ucode not in STATE["users"]:
-                        continue
-                    if ucode not in c["joined"]:
-                        c["joined"].append(ucode)
-                        added += 1
-                if added:
-                    save_state()
-            update_card(cid)
-            return self.send_json({"added": added, "view": build_view(cid, code)})
+            return self.send_json({"error": "звать можно только ссылкой"}, 404)
 
         if action == "delete":
             if code == c["created_by"]:
@@ -2034,14 +2133,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]
-        me = self.authorize()
+        me = self.authorize() if path.startswith("/api") else None
         if path == "/health":  # пульс для мониторинга bothost
             return self.send_json({"ok": True, "port": PORT, "bot": bool(BOT_TOKEN)})
         if path == "/stats":
             # статистика только для владельца: по секретному ключу (из URL) или по initData владельца
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
             key = (qs.get("key") or [""])[0]
-            owner_by_key = secrets.compare_digest(key, STATS_KEY) if key else False
+            owner_by_key = bool(key and STATS_KEY) and secrets.compare_digest(key.encode(), STATS_KEY.encode())
             owner_by_init = False
             if not owner_by_key:
                 try:
@@ -2085,7 +2184,8 @@ class Handler(BaseHTTPRequestHandler):
         return self.serve_static(path)
 
     def log_message(self, fmt, *args):
-        log.info(fmt % args)
+        message = re.sub(r'([?&]key=)[^ &"]*', r'\1[redacted]', fmt % args)
+        log.info(message)
 
 
 # ────────────────────────────────────────────────── демо-данные
@@ -2146,7 +2246,9 @@ WEBAPP_URL = os.environ.get(
 
 # ── статистика (только для владельца) ──
 OWNER_ID = int(os.environ.get("OWNER_ID", "170269038"))
-STATS_KEY = os.environ.get("STATS_KEY", "skidulis-stats-2026")
+STATS_KEY = os.environ.get("STATS_KEY", "")  # Optional; use a random secret, at least 32 characters.
+if len(STATS_KEY) < 32:
+    STATS_KEY = ""
 TEST_USER_IDS = {"555", "777222", "777001", "777002", "777003", "777004"}
 
 
@@ -2186,8 +2288,7 @@ def register_commands():
             log.warning("setChatMenuButton не сработал")
 
 
-def main():
-    load_state()
+def start_telegram():
     global bot_username
     offline = os.environ.get("BOT_OFFLINE", "") == "1"  # тесты: токен есть (для валидации initData), но в Telegram не ходим
     if BOT_TOKEN:
@@ -2199,10 +2300,15 @@ def main():
             threading.Thread(target=polling_loop, daemon=True).start()
     else:
         log.info("BOT_TOKEN не задан — запускается только веб-часть (демо-режим)")
-    threading.Thread(target=scheduler_loop, daemon=True).start()
 
-    httpd = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    httpd.daemon_threads = True
+
+def main():
+    load_state()
+
+    httpd = HTTPServer(("0.0.0.0", PORT), Handler)
+    # Bind first: slow Telegram calls must not leave BotHost's proxy without a listener.
+    threading.Thread(target=start_telegram, daemon=True).start()
+    threading.Thread(target=scheduler_loop, daemon=True).start()
     log.info("Бот: http://localhost:%d/app  (DEV_MODE=%s)", PORT, DEV_MODE)
     try:
         httpd.serve_forever()
