@@ -35,8 +35,6 @@ window.addEventListener('error', function (e) {
           stage: stage || 'load',
           msg: (msg || '').slice(0, 200),
           ua: navigator.userAgent,
-          href: location.href.split('#')[0],
-          hash: (location.hash || '').slice(1, 120),
           hasTG: !!(window.Telegram && window.Telegram.WebApp),
           vw: innerWidth, vh: innerHeight
         })
